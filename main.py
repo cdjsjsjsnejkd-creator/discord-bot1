@@ -3,12 +3,32 @@ from discord.ext import commands
 from discord import app_commands
 import random
 import os
+import sqlite3
+import time
 
 # Render 환경변수에서 토큰 가져오기
 TOKEN = os.getenv("TOKEN")
 
+# --------------------------------------------------
+# [DB 설정] SQLite 데이터베이스 연결 및 테이블 생성
+# --------------------------------------------------
+conn = sqlite3.connect('points.db')
+cursor = conn.cursor()
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        points INTEGER DEFAULT 0,
+        last_chat REAL DEFAULT 0
+    )
+''')
+conn.commit()
+
+# --------------------------------------------------
+# [Intents 설정] 채팅 감지를 위해 message_content 필수
+# --------------------------------------------------
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True  # 채팅 감지 권한 추가
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -28,6 +48,40 @@ class MyBot(commands.Bot):
         print("🔄 디스코드 서버와 다시 연결되었습니다!")
 
 bot = MyBot()
+
+# --------------------------------------------------
+# [이벤트] 채팅 감지 및 포인트 지급 (60초 쿨타임)
+# --------------------------------------------------
+CHAT_COOLDOWN = 60  # 포인트 지급 쿨타임 (초)
+
+@bot.event
+async def on_message(message: discord.Message):
+    # 봇 메시지이거나 DM 메시지인 경우 무시
+    if message.author.bot or not message.guild:
+        return
+
+    user_id = message.author.id
+    current_time = time.time()
+
+    cursor.execute('SELECT points, last_chat FROM users WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+
+    if result is None:
+        # 신규 유저 등록 및 첫 포인트 지급 (5~15pt)
+        earned = random.randint(5, 15)
+        cursor.execute('INSERT INTO users (user_id, points, last_chat) VALUES (?, ?, ?)',
+                       (user_id, earned, current_time))
+        conn.commit()
+    else:
+        points, last_chat = result
+        # 쿨타임이 지났으면 포인트 추가 지급
+        if current_time - last_chat >= CHAT_COOLDOWN:
+            earned = random.randint(5, 15)
+            cursor.execute('UPDATE users SET points = points + ?, last_chat = ? WHERE user_id = ?',
+                           (earned, current_time, user_id))
+            conn.commit()
+
+    await bot.process_commands(message)
 
 
 # --------------------------------------------------
@@ -179,8 +233,56 @@ async def update(interaction: discord.Interaction, 제목: str, 내용: str):
     await interaction.response.send_message(embed=embed)
 
 
+# --------------------------------------------------
+# [명령어 6] /포인트 (나 또는 타인 조회)
+# --------------------------------------------------
+@bot.tree.command(name="포인트", description="나 또는 다른 유저의 포인트를 확인합니다.")
+@app_commands.describe(유저="포인트를 조회할 유저 (선택)")
+async def check_points(interaction: discord.Interaction, 유저: discord.User = None):
+    target = 유저 or interaction.user
+
+    cursor.execute('SELECT points FROM users WHERE user_id = ?', (target.id,))
+    result = cursor.fetchone()
+    pts = result[0] if result else 0
+
+    embed = discord.Embed(title="🪙 포인트 정보", color=discord.Color.gold())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="유저", value=target.mention, inline=True)
+    embed.add_field(name="보유 포인트", value=f"**{pts:,}** PT", inline=True)
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+# --------------------------------------------------
+# [명령어 7] /랭킹 (Top 10)
+# --------------------------------------------------
+@bot.tree.command(name="랭킹", description="포인트 순위 Top 10을 확인합니다.")
+async def show_leaderboard(interaction: discord.Interaction):
+    cursor.execute('SELECT user_id, points FROM users ORDER BY points DESC LIMIT 10')
+    rows = cursor.fetchall()
+
+    if not rows:
+        await interaction.response.send_message("아직 등록된 포인트 데이터가 없습니다.")
+        return
+
+    embed = discord.Embed(title="🏆 포인트 랭킹 Top 10", color=discord.Color.gold())
+    
+    rank_text = ""
+    for idx, (user_id, pts) in enumerate(rows, start=1):
+        medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"`{idx}.`"
+        rank_text += f"{medal} <@{user_id}> - **{pts:,}** PT\n"
+
+    embed.description = rank_text
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
+
+# --------------------------------------------------
 # 봇 실행
+# --------------------------------------------------
 if TOKEN:
     bot.run(TOKEN)
 else:
     print("❌ 에러: TOKEN 환경변수가 설정되지 않았습니다.")
+
