@@ -175,7 +175,6 @@ class BlackjackView(discord.ui.View):
         p_score = calculate_score(self.player_hand)
 
         if p_score > 21:
-            # 버스트 (패배) - 1.5배 손실
             loss_amount = int(self.bet * 1.5)
             cursor.execute('UPDATE users SET points = points - ? WHERE user_id = ?', (loss_amount, self.player.id))
             conn.commit()
@@ -199,7 +198,6 @@ class BlackjackView(discord.ui.View):
         for child in self.children:
             child.disabled = True
 
-        # 딜러 AI: 17점 이상이 될 때까지 계속 뽑음
         while calculate_score(self.dealer_hand) < 17:
             self.dealer_hand.append(self.deck.pop())
 
@@ -207,25 +205,21 @@ class BlackjackView(discord.ui.View):
         d_score = calculate_score(self.dealer_hand)
 
         loss_amount = int(self.bet * 1.5)
-        win_amount = self.bet  # 순이익 = 베팅금 100% 추가 (총 2배 환급 효과)
+        win_amount = self.bet
 
         if d_score > 21:
-            # 딜러 버스트 -> 유저 승리
             cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (win_amount, self.player.id))
             conn.commit()
             result_msg = f"🏆 딜러 버스트! 승리했습니다!\n🔺 **+{win_amount:,}** PT 획득!"
         elif p_score > d_score:
-            # 유저 승리
             cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (win_amount, self.player.id))
             conn.commit()
             result_msg = f"🏆 딜러보다 높은 점수로 승리했습니다!\n🔺 **+{win_amount:,}** PT 획득!"
         elif p_score < d_score:
-            # 유저 패배 (1.5배 차감)
             cursor.execute('UPDATE users SET points = points - ? WHERE user_id = ?', (loss_amount, self.player.id))
             conn.commit()
             result_msg = f"💀 딜러보다 점수가 낮아 패배했습니다...\n🔻 **-{loss_amount:,}** PT 차감되었습니다."
         else:
-            # 무승부 (변동 없음)
             result_msg = "🤝 무승부입니다! 베팅금이 적립/차감 없이 보존됩니다."
 
         embed = self.make_embed(title="🎲 게임 종료", end=True)
@@ -241,7 +235,6 @@ async def blackjack_start(interaction: discord.Interaction, 베팅금액: int):
         await interaction.response.send_message("❌ 베팅 금액은 1 PT 이상이어야 합니다.", ephemeral=True)
         return
 
-    # 유저의 현재 보유 포인트 및 최대 손실 가능액(1.5배) 체크
     cursor.execute('SELECT points FROM users WHERE user_id = ?', (interaction.user.id,))
     row = cursor.fetchone()
     current_pts = row[0] if row else 0
@@ -517,6 +510,41 @@ async def tictactoe_stats(interaction: discord.Interaction, 유저: discord.User
 
 
 # --------------------------------------------------
+# [신규 기능] 관리자 전용 포인트 지급 명령어
+# --------------------------------------------------
+
+@bot.tree.command(name="포인트지급", description="[관리자 전용] 지정한 유저에게 포인트를 지급합니다.")
+@app_commands.describe(유저="포인트를 받게 될 유저", 지급액="지급할 포인트 양")
+@app_commands.checks.has_permissions(administrator=True)
+async def give_points(interaction: discord.Interaction, 유저: discord.Member, 지급액: int):
+    if 지급액 <= 0:
+        await interaction.response.send_message("❌ 지급할 포인트는 1 PT 이상이어야 합니다.", ephemeral=True)
+        return
+
+    cursor.execute('SELECT points FROM users WHERE user_id = ?', (유저.id,))
+    result = cursor.fetchone()
+
+    if result is None:
+        new_points = 지급액
+        cursor.execute('INSERT INTO users (user_id, points, last_chat) VALUES (?, ?, ?)',
+                       (유저.id, new_points, time.time()))
+    else:
+        new_points = result[0] + 지급액
+        cursor.execute('UPDATE users SET points = ? WHERE user_id = ?', (new_points, 유저.id))
+
+    conn.commit()
+
+    embed = discord.Embed(title="🪙 포인트 지급 완료", color=discord.Color.gold())
+    embed.set_thumbnail(url=유저.display_avatar.url)
+    embed.add_field(name="지급 대상", value=유저.mention, inline=True)
+    embed.add_field(name="지급 금액", value=f"**+{지급액:,}** PT", inline=True)
+    embed.add_field(name="보유 포인트", value=f"**{new_points:,}** PT", inline=False)
+    embed.set_footer(text=f"처리자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+# --------------------------------------------------
 # [기존 기타 명령어 모음]
 # --------------------------------------------------
 
@@ -749,3 +777,4 @@ if TOKEN:
     bot.run(TOKEN)
 else:
     print("❌ 에러: TOKEN 환경변수가 설정되지 않았습니다.")
+
