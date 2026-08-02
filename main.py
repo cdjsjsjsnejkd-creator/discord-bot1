@@ -18,7 +18,6 @@ def home():
     return "Bot is Alive!"
 
 def run_web():
-    # Render가 기본적으로 제공하는 PORT 번호를 사용 (없으면 8080)
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -26,11 +25,12 @@ def keep_alive():
     t = Thread(target=run_web)
     t.start()
 
-# --------------------------------------------------
-# [환경변수 및 DB 설정]
-# --------------------------------------------------
+# Render 환경변수에서 토큰 가져오기
 TOKEN = os.getenv("TOKEN")
 
+# --------------------------------------------------
+# [DB 설정] SQLite 데이터베이스 연결 및 테이블 생성
+# --------------------------------------------------
 conn = sqlite3.connect('points.db')
 cursor = conn.cursor()
 cursor.execute('''
@@ -43,11 +43,11 @@ cursor.execute('''
 conn.commit()
 
 # --------------------------------------------------
-# [Intents 및 봇 클래스 설정]
+# [Intents 설정] 채팅 감지를 위해 message_content 필수
 # --------------------------------------------------
 intents = discord.Intents.default()
 intents.members = True
-intents.message_content = True
+intents.message_content = True  # 채팅 감지 권한 추가
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -69,12 +69,13 @@ class MyBot(commands.Bot):
 bot = MyBot()
 
 # --------------------------------------------------
-# [이벤트] 채팅 감지 및 포인트 지급
+# [이벤트] 채팅 감지 및 포인트 지급 (60초 쿨타임)
 # --------------------------------------------------
-CHAT_COOLDOWN = 60
+CHAT_COOLDOWN = 60  # 포인트 지급 쿨타임 (초)
 
 @bot.event
 async def on_message(message: discord.Message):
+    # 봇 메시지이거나 DM 메시지인 경우 무시
     if message.author.bot or not message.guild:
         return
 
@@ -85,12 +86,14 @@ async def on_message(message: discord.Message):
     result = cursor.fetchone()
 
     if result is None:
+        # 신규 유저 등록 및 첫 포인트 지급 (5~15pt)
         earned = random.randint(5, 15)
         cursor.execute('INSERT INTO users (user_id, points, last_chat) VALUES (?, ?, ?)',
                        (user_id, earned, current_time))
         conn.commit()
     else:
         points, last_chat = result
+        # 쿨타임이 지났으면 포인트 추가 지급
         if current_time - last_chat >= CHAT_COOLDOWN:
             earned = random.randint(5, 15)
             cursor.execute('UPDATE users SET points = points + ?, last_chat = ? WHERE user_id = ?',
@@ -99,8 +102,9 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
+
 # --------------------------------------------------
-# [기능 1] 투표용 버튼 뷰(View)
+# [기능 1] 투표용 버튼 뷰(View) 클래스
 # --------------------------------------------------
 class PollView(discord.ui.View):
     def __init__(self, topic, option1, option2):
@@ -139,13 +143,15 @@ class PollView(discord.ui.View):
         self.votes[interaction.user.id] = 2
         await self.update_poll(interaction)
 
+
 # --------------------------------------------------
-# [명령어 모음]
+# [명령어 1] /유저정보
 # --------------------------------------------------
 @bot.tree.command(name="유저정보", description="유저의 정보를 확인합니다.")
 @app_commands.describe(유저="정보를 확인할 유저")
 async def 유저정보(interaction: discord.Interaction, 유저: discord.Member = None):
     await interaction.response.defer()
+
     if 유저 is None:
         유저 = interaction.user
 
@@ -161,10 +167,18 @@ async def 유저정보(interaction: discord.Interaction, 유저: discord.Member 
     embed.set_footer(text=f"요청자: {interaction.user.display_name}")
     await interaction.followup.send(embed=embed)
 
+
+# --------------------------------------------------
+# [명령어 2] /투표
+# --------------------------------------------------
 @bot.tree.command(name="투표", description="간단한 투표를 진행합니다.")
 @app_commands.describe(주제="투표 주제를 입력하세요", 항목1="첫 번째 선택지", 항목2="두 번째 선택지")
 async def 투표(interaction: discord.Interaction, 주제: str, 항목1: str, 항목2: str):
-    embed = discord.Embed(title=f"📊 투표: {주제}", description="아래 버튼을 눌러 투표에 참여하세요!", color=discord.Color.gold())
+    embed = discord.Embed(
+        title=f"📊 투표: {주제}",
+        description="아래 버튼을 눌러 투표에 참여하세요!",
+        color=discord.Color.gold()
+    )
     embed.add_field(name=f"1️⃣ {항목1}", value="**0표**", inline=True)
     embed.add_field(name=f"2️⃣ {항목2}", value="**0표**", inline=True)
     embed.set_footer(text=f"투표 발의자: {interaction.user.display_name}")
@@ -172,37 +186,75 @@ async def 투표(interaction: discord.Interaction, 주제: str, 항목1: str, �
     view = PollView(주제, 항목1, 항목2)
     await interaction.response.send_message(embed=embed, view=view)
 
+
+# --------------------------------------------------
+# [명령어 3] /골라줘
+# --------------------------------------------------
 @bot.tree.command(name="골라줘", description="3개의 항목 중 1개를 랜덤으로 골라줍니다.")
 @app_commands.describe(항목1="첫 번째 선택지", 항목2="두 번째 선택지", 항목3="세 번째 선택지")
 async def 골라줘(interaction: discord.Interaction, 항목1: str, 항목2: str, 항목3: str):
     await interaction.response.defer()
-    selected = random.choice([항목1, 항목2, 항목3])
 
-    embed = discord.Embed(title="🎲 고르기 결과!", description="고민하지 마세요! 봇의 선택은 바로...", color=discord.Color.green())
+    options = [항목1, 항목2, 항목3]
+    selected = random.choice(options)
+
+    embed = discord.Embed(
+        title="🎲 고르기 결과!",
+        description="고민하지 마세요! 봇의 선택은 바로...",
+        color=discord.Color.green()
+    )
     embed.add_field(name="📋 후보 목록", value=f"1. {항목1}\n2. {항목2}\n3. {항목3}", inline=False)
     embed.add_field(name="✨ 당첨!", value=f"👉 **{selected}**", inline=False)
     embed.set_footer(text=f"요청자: {interaction.user.display_name}")
 
     await interaction.followup.send(embed=embed)
 
+
+# --------------------------------------------------
+# [명령어 4] /공지 (관리자 전용)
+# --------------------------------------------------
 @bot.tree.command(name="공지", description="공지사항을 작성합니다.")
 @app_commands.describe(제목="공지 제목", 내용="공지 내용")
 @app_commands.checks.has_permissions(administrator=True)
 async def notice(interaction: discord.Interaction, 제목: str, 내용: str):
-    embed = discord.Embed(title=f"📢 {제목}", description=내용, color=discord.Color.blue())
-    embed.set_footer(text=f"작성자 : {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+    embed = discord.Embed(
+        title=f"📢 {제목}",
+        description=내용,
+        color=discord.Color.blue()
+    )
+    embed.set_footer(
+        text=f"작성자 : {interaction.user.display_name}",
+        icon_url=interaction.user.display_avatar.url
+    )
     embed.timestamp = discord.utils.utcnow()
+
     await interaction.response.send_message(embed=embed)
 
+
+# --------------------------------------------------
+# [명령어 5] /업데이트 (관리자 전용)
+# --------------------------------------------------
 @bot.tree.command(name="업데이트", description="업데이트 공지를 작성합니다.")
 @app_commands.describe(제목="업데이트 제목", 내용="업데이트 내용")
 @app_commands.checks.has_permissions(administrator=True)
 async def update(interaction: discord.Interaction, 제목: str, 내용: str):
-    embed = discord.Embed(title=f"🛠️ {제목}", description=내용, color=discord.Color.green())
-    embed.set_footer(text=f"작성자 : {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+    embed = discord.Embed(
+        title=f"🛠️ {제목}",
+        description=내용,
+        color=discord.Color.green()
+    )
+    embed.set_footer(
+        text=f"작성자 : {interaction.user.display_name}",
+        icon_url=interaction.user.display_avatar.url
+    )
     embed.timestamp = discord.utils.utcnow()
+
     await interaction.response.send_message(embed=embed)
 
+
+# --------------------------------------------------
+# [명령어 6] /포인트 (나 또는 타인 조회)
+# --------------------------------------------------
 @bot.tree.command(name="포인트", description="나 또는 다른 유저의 포인트를 확인합니다.")
 @app_commands.describe(유저="포인트를 조회할 유저 (선택)")
 async def check_points(interaction: discord.Interaction, 유저: discord.User = None):
@@ -220,6 +272,10 @@ async def check_points(interaction: discord.Interaction, 유저: discord.User = 
 
     await interaction.response.send_message(embed=embed)
 
+
+# --------------------------------------------------
+# [명령어 7] /랭킹 (Top 10)
+# --------------------------------------------------
 @bot.tree.command(name="랭킹", description="포인트 순위 Top 10을 확인합니다.")
 async def show_leaderboard(interaction: discord.Interaction):
     cursor.execute('SELECT user_id, points FROM users ORDER BY points DESC LIMIT 10')
@@ -240,12 +296,14 @@ async def show_leaderboard(interaction: discord.Interaction):
     embed.set_footer(text=f"요청자: {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
+
 # --------------------------------------------------
-# [실행] 웹 서버와 디스코드 봇을 동시에 구동
+# [실행] 웹 서버와 봇을 동시에 실행
 # --------------------------------------------------
 if TOKEN:
-    keep_alive()  # 웹 서버 먼저 가동 (24시간 유지용)
+    keep_alive()  # 24시간 유지용 셀프 웹 서버 실행
     bot.run(TOKEN)
 else:
     print("❌ 에러: TOKEN 환경변수가 설정되지 않았습니다.")
+
 
