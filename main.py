@@ -111,7 +111,7 @@ async def on_message(message: discord.Message):
 
 
 # --------------------------------------------------
-# [미니게임] 블랙잭 (최소 10 PT 베팅, 패배 시 보유 포인트의 반 차감)
+# [미니게임] 블랙잭 (최소 10 PT 베팅 / 승리 시 2배 지급 / 패배 시 보유액 50% 차감)
 # --------------------------------------------------
 
 SUITS = ['♠️', '♥️', '♦️', '♣️']
@@ -152,15 +152,18 @@ class BlackjackView(discord.ui.View):
         p_score = calculate_score(self.player_hand)
         d_score = calculate_score(self.dealer_hand)
 
-        # 현재 유저의 잔액을 불러와서 패배 시 잃을 금액(잔액의 반) 미리 계산 표시
+        # 현재 유저 잔액 기반 패배 시 차감 예정 금액 (50%)
         cursor.execute('SELECT points FROM users WHERE user_id = ?', (self.player.id,))
         row = cursor.fetchone()
         current_pts = float(row[0]) if row else 0.0
         potential_loss = round(current_pts * 0.5, 2)
+        
+        # 승리 시 획득 금액 (베팅금액의 2배)
+        win_reward = round(self.bet * 2, 2)
 
         embed = discord.Embed(title=title, color=discord.Color.gold() if not end else discord.Color.dark_purple())
         embed.set_author(name=self.player.display_name, icon_url=self.player.display_avatar.url)
-        embed.add_field(name="💰 베팅금액", value=f"**{self.bet:,.2f}** PT (승리 시 **+{self.bet:,.2f}** / 패배 시 **보유액의 50%인 -{potential_loss:,.2f}** PT 손실)", inline=False)
+        embed.add_field(name="💰 베팅금액", value=f"**{self.bet:,.2f}** PT (승리 시 **+{win_reward:,.2f}** / 패배 시 **보유액 50%인 -{potential_loss:,.2f}** PT 손실)", inline=False)
         
         embed.add_field(name=f"👤 플레이어 카드 ({p_score}점)", value=render_cards(self.player_hand), inline=False)
         
@@ -181,7 +184,7 @@ class BlackjackView(discord.ui.View):
         p_score = calculate_score(self.player_hand)
 
         if p_score > 21:
-            # 패배 시 현재 보유 포인트의 50% 차감
+            # 버스트 패배 시 보유 포인트의 50% 차감
             cursor.execute('SELECT points FROM users WHERE user_id = ?', (self.player.id,))
             row = cursor.fetchone()
             current_pts = float(row[0]) if row else 0.0
@@ -215,18 +218,19 @@ class BlackjackView(discord.ui.View):
         p_score = calculate_score(self.player_hand)
         d_score = calculate_score(self.dealer_hand)
 
-        win_amount = self.bet
+        # 승리 시 베팅금의 2배 지급
+        win_amount = round(self.bet * 2, 2)
 
         if d_score > 21:
             cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (win_amount, self.player.id))
             conn.commit()
-            result_msg = f"🏆 딜러 버스트! 승리했습니다!\n🔺 **+{win_amount:,.2f}** PT 획득!"
+            result_msg = f"🏆 딜러 버스트! 승리했습니다!\n🔺 베팅금의 2배인 **+{win_amount:,.2f}** PT 획득!"
         elif p_score > d_score:
             cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (win_amount, self.player.id))
             conn.commit()
-            result_msg = f"🏆 딜러보다 높은 점수로 승리했습니다!\n🔺 **+{win_amount:,.2f}** PT 획득!"
+            result_msg = f"🏆 딜러보다 높은 점수로 승리했습니다!\n🔺 베팅금의 2배인 **+{win_amount:,.2f}** PT 획득!"
         elif p_score < d_score:
-            # 패배 시 현재 보유 포인트의 50% 차감
+            # 패배 시 보유 포인트의 50% 차감
             cursor.execute('SELECT points FROM users WHERE user_id = ?', (self.player.id,))
             row = cursor.fetchone()
             current_pts = float(row[0]) if row else 0.0
@@ -258,7 +262,7 @@ async def blackjack_start(interaction: discord.Interaction, 베팅금액: float)
     row = cursor.fetchone()
     current_pts = float(row[0]) if row else 0.0
 
-    # 최소 10 PT 이상의 잔액이 있는지 확인
+    # 최소 10 PT 이상의 잔액 확인
     if current_pts < 10.0:
         await interaction.response.send_message(
             f"❌ 포인트가 부족합니다!\n"
@@ -305,9 +309,9 @@ async def blackjack_info(interaction: discord.Interaction):
     embed.add_field(
         name="💰 승패 및 포인트 배율",
         value=(
-            "• **승리:** 베팅금만큼 포인트를 획득합니다. (`+베팅금`)\n"
+            "• **승리:** 베팅금의 **2배**를 획득합니다! (`+베팅금 × 2`)\n"
             "• **무승부:** 베팅금을 그대로 돌려받습니다.\n"
-            "• **패배 / 버스트:** 현재 보유하고 계신 **포인트의 절반(50%)**이 차감됩니다!"
+            "• **패배 / 버스트:** 현재 보유 포인트의 **절반(50%)**이 차감됩니다!"
         ),
         inline=False
     )
