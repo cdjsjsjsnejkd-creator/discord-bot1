@@ -33,7 +33,6 @@ TOKEN = os.getenv("TOKEN")
 conn = sqlite3.connect('points.db')
 cursor = conn.cursor()
 
-# 1. 포인트 테이블
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -42,7 +41,6 @@ cursor.execute('''
     )
 ''')
 
-# 2. 경고 테이블
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS warnings (
         user_id INTEGER PRIMARY KEY,
@@ -50,7 +48,6 @@ cursor.execute('''
     )
 ''')
 
-# 3. 틱택토 전적 테이블 (추가됨)
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS tictactoe_stats (
         user_id INTEGER PRIMARY KEY,
@@ -169,11 +166,12 @@ class TicTacToeButton(discord.ui.Button):
 
 
 class TicTacToeView(discord.ui.View):
-    def __init__(self, player: discord.User, size: int):
+    def __init__(self, player: discord.User, size: int, difficulty: str):
         super().__init__(timeout=180)
         self.player = player
         self.size = size  # 3 또는 6
         self.win_req = 3 if size == 3 else 4  # 승리 조건 (3x3은 3줄, 6x6은 4줄 연속)
+        self.difficulty = difficulty  # 'easy', 'normal', 'hard'
         
         self.current_round = 1
         self.p_wins = 0
@@ -185,39 +183,38 @@ class TicTacToeView(discord.ui.View):
         self.clear_items()
         self.board = [[0 for _ in range(self.size)] for _ in range(self.size)]
         
-        # 3x3은 9개 버튼, 6x6은 25개 한계(디스코드 버그 방지)로 5x5 배치 방식 활용
         for y in range(self.size):
             for x in range(self.size):
                 if self.size == 6 and (x >= 5 or y >= 5): 
-                    continue # 디스코드 버튼 최대 25개 제한으로 5x5 그리드로 자동 보정
+                    continue # 디스코드 버튼 최대 25개 제한으로 5x5 그리드로 보정
                 self.add_item(TicTacToeButton(x, y))
 
     def is_board_full(self) -> bool:
-        max_limit = min(self.size, 5)
-        for y in range(max_limit):
-            for x in range(max_limit):
+        limit = min(self.size, 5)
+        for y in range(limit):
+            for x in range(limit):
                 if self.board[y][x] == 0:
                     return False
         return True
 
-    def check_winner(self, mark: int) -> bool:
+    def check_winner(self, mark: int, board_state=None) -> bool:
+        b = board_state if board_state is not None else self.board
         limit = min(self.size, 5)
         req = self.win_req
 
-        # 가로, 세로, 대각선 체크
         for r in range(limit):
             for c in range(limit):
                 # 가로
-                if c + req <= limit and all(self.board[r][c+i] == mark for i in range(req)):
+                if c + req <= limit and all(b[r][c+i] == mark for i in range(req)):
                     return True
                 # 세로
-                if r + req <= limit and all(self.board[r+i][c] == mark for i in range(req)):
+                if r + req <= limit and all(b[r+i][c] == mark for i in range(req)):
                     return True
                 # 대각선 ↘
-                if r + req <= limit and c + req <= limit and all(self.board[r+i][c+i] == mark for i in range(req)):
+                if r + req <= limit and c + req <= limit and all(b[r+i][c+i] == mark for i in range(req)):
                     return True
                 # 대각선 ↙
-                if r + req <= limit and c - req + 1 >= 0 and all(self.board[r+i][c-i] == mark for i in range(req)):
+                if r + req <= limit and c - req + 1 >= 0 and all(b[r+i][c-i] == mark for i in range(req)):
                     return True
         return False
 
@@ -232,11 +229,51 @@ class TicTacToeView(discord.ui.View):
         if not empty_cells:
             return
 
-        # AI 알고리즘: 기본 랜덤
-        x, y = random.choice(empty_cells)
+        target_move = None
+
+        # ----------------------------------
+        # AI 난이도별 스마트 로직
+        # ----------------------------------
+        if self.difficulty in ['normal', 'hard']:
+            # 1. AI가 이번 수로 이길 수 있는지 체크 (공격)
+            for x, y in empty_cells:
+                self.board[y][x] = 2
+                if self.check_winner(2):
+                    target_move = (x, y)
+                    self.board[y][x] = 0
+                    break
+                self.board[y][x] = 0
+
+            # 2. 유저가 다음 수로 이기는 것을 방어 (블로킹)
+            if not target_move:
+                for x, y in empty_cells:
+                    self.board[y][x] = 1
+                    if self.check_winner(1):
+                        target_move = (x, y)
+                        self.board[y][x] = 0
+                        break
+                    self.board[y][x] = 0
+
+        if self.difficulty == 'hard' and not target_move:
+            # 3. 어려움 난이도: 중앙 선점 시도
+            center = limit // 2
+            if (center, center) in empty_cells:
+                target_move = (center, center)
+            else:
+                # 모서리 선점 시도
+                corners = [(0, 0), (0, limit - 1), (limit - 1, 0), (limit - 1, limit - 1)]
+                available_corners = [c for c in corners if c in empty_cells]
+                if available_corners:
+                    target_move = random.choice(available_corners)
+
+        # 결정된 위치가 없으면 랜덤 선택
+        if not target_move:
+            target_move = random.choice(empty_cells)
+
+        x, y = target_move
         self.board[y][x] = 2
 
-        # 버튼 상태 업데이트
+        # 버튼 UI 업데이트
         for item in self.children:
             if isinstance(item, TicTacToeButton) and item.x == x and item.y == y:
                 item.style = discord.ButtonStyle.success
@@ -245,18 +282,17 @@ class TicTacToeView(discord.ui.View):
                 break
 
     def make_embed(self, msg: str = "") -> discord.Embed:
+        diff_name = {"easy": "쉬움 🟢", "normal": "보통 🟡", "hard": "어려움 🔴"}.get(self.difficulty, "보통")
         embed = discord.Embed(
-            title=f"🎮 틱택토 ({self.size}x{self.size}) - {self.current_round}/3 라운드",
+            title=f"🎮 틱택토 ({self.size}x{self.size}) - [난이도: {diff_name}]",
             color=discord.Color.blue()
         )
-        embed.description = f"{msg}\n\n👤 **{self.player.display_name}**: `{self.p_wins}승` | 🤖 **AI**: `{self.b_wins}승`"
+        embed.description = f"{msg}\n\n📌 **현재:** `{self.current_round}/3 라운드`\n👤 **{self.player.display_name}**: `{self.p_wins}승` | 🤖 **AI**: `{self.b_wins}승`"
         embed.set_footer(text="❌ : 유저 | ⭕ : AI")
         return embed
 
     async def next_round(self, interaction: discord.Interaction, round_msg: str):
-        # 매 라운드 종료 조건 체크 (3판 진행 또는 누군가 2승 달성)
         if self.p_wins == 2 or self.b_wins == 2 or self.current_round == 3:
-            # 게임 최종 종료
             for item in self.children:
                 item.disabled = True
 
@@ -275,7 +311,6 @@ class TicTacToeView(discord.ui.View):
             await interaction.response.edit_message(embed=embed, view=self)
             self.stop()
         else:
-            # 다음 라운드 진행
             self.current_round += 1
             self.reset_board()
             embed = self.make_embed(f"{round_msg}\n\n➡️ **{self.current_round}라운드를 시작합니다!**")
@@ -300,18 +335,30 @@ class TicTacToeView(discord.ui.View):
 
 
 # --------------------------------------------------
-# [명령어] /틱택토 및 /틱택토 승률
+# [명령어] /틱택토 및 /틱택토승률
 # --------------------------------------------------
 
 @bot.tree.command(name="틱택토", description="AI와 틱택토 3라운드 대결을 진행합니다.")
-@app_commands.describe(난이도="게임판 크기를 선택하세요.")
-@app_commands.choices(난이도=[
-    app_commands.Choice(name="3x3 (기본)", value="3"),
-    app_commands.Choice(name="6x6 (확장)", value="6")
-])
-async def tictactoe_start(interaction: discord.Interaction, 난이도: app_commands.Choice[str]):
-    size = int(난이도.value)
-    view = TicTacToeView(interaction.user, size)
+@app_commands.describe(판크기="게임판 크기를 선택하세요.", 난이도="AI의 난이도를 선택하세요.")
+@app_commands.choices(
+    판크기=[
+        app_commands.Choice(name="3x3 (기본)", value="3"),
+        app_commands.Choice(name="6x6 (확장)", value="6")
+    ],
+    난이도=[
+        app_commands.Choice(name="쉬움 (랜덤 수)", value="easy"),
+        app_commands.Choice(name="보통 (공격/방어)", value="normal"),
+        app_commands.Choice(name="어려움 (스마트 AI)", value="hard")
+    ]
+)
+async def tictactoe_start(
+    interaction: discord.Interaction, 
+    판크기: app_commands.Choice[str], 
+    난이도: app_commands.Choice[str]
+):
+    size = int(판크기.value)
+    diff = 난이도.value
+    view = TicTacToeView(interaction.user, size, diff)
     embed = view.make_embed("게임이 시작되었습니다! 먼저 ❌를 둘 위치를 선택하세요.")
     await interaction.response.send_message(embed=embed, view=view)
 
@@ -573,6 +620,3 @@ if TOKEN:
     bot.run(TOKEN)
 else:
     print("❌ 에러: TOKEN 환경변수가 설정되지 않았습니다.")
-
-
-
