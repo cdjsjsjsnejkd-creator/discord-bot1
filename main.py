@@ -28,7 +28,7 @@ def keep_alive():
 TOKEN = os.getenv("TOKEN")
 
 # --------------------------------------------------
-# [DB 설정]
+# [DB 설정] SQLite 데이터베이스 연결 및 테이블 생성
 # --------------------------------------------------
 conn = sqlite3.connect('points.db')
 cursor = conn.cursor()
@@ -77,6 +77,37 @@ class MyBot(commands.Bot):
         print(f"✅ 로그인 완료: {self.user}")
 
 bot = MyBot()
+
+# --------------------------------------------------
+# [이벤트] 채팅 감지 및 포인트 지급 (60초 쿨타임)
+# --------------------------------------------------
+CHAT_COOLDOWN = 60
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild:
+        return
+
+    user_id = message.author.id
+    current_time = time.time()
+
+    cursor.execute('SELECT points, last_chat FROM users WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+
+    if result is None:
+        earned = float(random.randint(5, 15))
+        cursor.execute('INSERT INTO users (user_id, points, last_chat) VALUES (?, ?, ?)',
+                       (user_id, earned, current_time))
+        conn.commit()
+    else:
+        points, last_chat = result
+        if current_time - last_chat >= CHAT_COOLDOWN:
+            earned = float(random.randint(5, 15))
+            cursor.execute('UPDATE users SET points = points + ?, last_chat = ? WHERE user_id = ?',
+                           (earned, current_time, user_id))
+            conn.commit()
+
+    await bot.process_commands(message)
 
 # --------------------------------------------------
 # [공통 카드 유틸]
@@ -129,7 +160,7 @@ class BlackjackBotView(discord.ui.View):
 
         embed = discord.Embed(title=title, color=discord.Color.gold() if not end else discord.Color.dark_purple())
         embed.set_author(name=self.player.display_name, icon_url=self.player.display_avatar.url)
-        embed.add_field(name="💰 베팅금액", value=f"**{self.bet:,.2f}** PT (승리 시 **+{win_reward:,.2f}** / 패배 시 **-{potential_loss:,.2f}** PT)", inline=False)
+        embed.add_field(name="💰 베팅금액", value=f"**{self.bet:,.2f}** PT (승리 시 **+{win_reward:,.2f}** / 패배 시 보유액 50%인 **-{potential_loss:,.2f}** PT)", inline=False)
         embed.add_field(name=f"👤 플레이어 카드 ({p_score}점 / 100점)", value=render_cards(self.player_hand), inline=False)
         
         if end:
@@ -160,7 +191,7 @@ class BlackjackBotView(discord.ui.View):
                 child.disabled = True
 
             embed = self.make_embed(title="💥 버스트! (100점 초과 패배)", end=True)
-            embed.add_field(name="결과", value=f"💀 100점을 초과하여 패배했습니다.\n🔻 **-{loss_amount:,.2f}** PT가 차감되었습니다.", inline=False)
+            embed.add_field(name="결과", value=f"💀 100점을 초과하여 패배했습니다.\n🔻 보유 포인트의 50%인 **-{loss_amount:,.2f}** PT가 차감되었습니다.", inline=False)
             await interaction.response.edit_message(embed=embed, view=self)
             self.stop()
         else:
@@ -204,7 +235,7 @@ class BlackjackBotView(discord.ui.View):
         self.stop()
 
 # --------------------------------------------------
-# [블랙잭 - 플레이어 대전(1v1) View 및 대기열]
+# [블랙잭 - 플레이어 대전(1v1) View]
 # --------------------------------------------------
 class BlackjackPVPView(discord.ui.View):
     def __init__(self, p1: discord.User, p2: discord.User, bet: float):
@@ -221,7 +252,7 @@ class BlackjackPVPView(discord.ui.View):
         
         self.p1_done = False
         self.p2_done = False
-        self.current_turn = p1  # P1 선공
+        self.current_turn = p1
 
     def make_embed(self, title="⚔️ 1v1 블랙잭 대전", end=False):
         s1 = calculate_score(self.p1_hand)
@@ -240,7 +271,6 @@ class BlackjackPVPView(discord.ui.View):
 
     async def check_next_turn(self, interaction: discord.Interaction):
         if self.p1_done and self.p2_done:
-            # 둘 다 완료 -> 결과 처리
             for child in self.children:
                 child.disabled = True
 
@@ -266,7 +296,6 @@ class BlackjackPVPView(discord.ui.View):
 
             if winner:
                 loser = self.p2 if winner == self.p1 else self.p1
-                # 베팅금 정산
                 cursor.execute('UPDATE users SET points = MAX(0, points - ?) WHERE user_id = ?', (self.bet, loser.id))
                 cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (self.bet, winner.id))
                 conn.commit()
@@ -277,7 +306,6 @@ class BlackjackPVPView(discord.ui.View):
             await interaction.response.edit_message(embed=embed, view=self)
             self.stop()
         else:
-            # 턴 교체
             if self.current_turn == self.p1 and not self.p2_done:
                 self.current_turn = self.p2
             elif self.current_turn == self.p2 and not self.p1_done:
@@ -315,7 +343,9 @@ class BlackjackPVPView(discord.ui.View):
 
         await self.check_next_turn(interaction)
 
-
+# --------------------------------------------------
+# [1v1 대전 매칭 대기열 View]
+# --------------------------------------------------
 class MatchWaitView(discord.ui.View):
     def __init__(self, host: discord.User, game_type: str, bet: float = 0.0, size: int = 3):
         super().__init__(timeout=180)
@@ -330,7 +360,6 @@ class MatchWaitView(discord.ui.View):
             await interaction.response.send_message("❌ 자신이 올린 매칭은 본인이 수락할 수 없습니다.", ephemeral=True)
             return
 
-        # 블랙잭 포인트 확인
         if self.game_type == "blackjack":
             cursor.execute('SELECT points FROM users WHERE user_id = ?', (interaction.user.id,))
             row = cursor.fetchone()
@@ -349,7 +378,6 @@ class MatchWaitView(discord.ui.View):
             await interaction.response.edit_message(content=f"🎮 **{self.host.mention} vs {interaction.user.mention}** 틱택토 대전!", embed=embed, view=view)
 
         self.stop()
-
 
 # --------------------------------------------------
 # [틱택토 - 플레이어 대전(1v1) View]
@@ -400,7 +428,7 @@ class TicTacToePVPView(discord.ui.View):
         self.p2 = p2
         self.size = size
         self.win_req = 3 if size == 3 else 4
-        self.turn = 1 # 1: P1(X), 2: P2(O)
+        self.turn = 1
 
         self.current_round = 1
         self.p1_wins = 0
@@ -459,97 +487,8 @@ class TicTacToePVPView(discord.ui.View):
             embed = self.make_embed(f"{round_msg}\n\n➡️ **{self.current_round}라운드를 시작합니다!**")
             await interaction.response.edit_message(embed=embed, view=self)
 
-
 # --------------------------------------------------
-# [슬래시 명령어] 블랙잭 & 틱택토
-# --------------------------------------------------
-
-@bot.tree.command(name="블랙잭", description="포인트를 걸고 블랙잭 게임을 합니다.")
-@app_commands.describe(
-    상대="대결 상대 선택 (봇 또는 다른 플레이어)",
-    베팅금액="베팅할 포인트 금액 (최소 10 PT 이상)"
-)
-@app_commands.choices(
-    상대=[
-        app_commands.Choice(name="🤖 봇 (AI 대전)", value="bot"),
-        app_commands.Choice(name="⚔️ 플레이어 대전 (1v1 매칭)", value="player")
-    ]
-)
-async def blackjack_start(interaction: discord.Interaction, 상대: app_commands.Choice[str], 베팅금액: float):
-    베팅금액 = round(베팅금액, 2)
-    if 베팅금액 < 10.0:
-        await interaction.response.send_message("❌ 블랙잭은 최소 **10 PT**부터 시작할 수 있습니다.", ephemeral=True)
-        return
-
-    cursor.execute('SELECT points FROM users WHERE user_id = ?', (interaction.user.id,))
-    row = cursor.fetchone()
-    current_pts = float(row[0]) if row else 0.0
-
-    if current_pts < 베팅금액:
-        await interaction.response.send_message(f"❌ 포인트가 부족합니다. (현재 보유: **{current_pts:,.2f}** PT)", ephemeral=True)
-        return
-
-    if 상대.value == "bot":
-        view = BlackjackBotView(interaction.user, 베팅금액)
-        embed = view.make_embed()
-        await interaction.response.send_message(embed=embed, view=view)
-    else:
-        view = MatchWaitView(interaction.user, game_type="blackjack", bet=베팅금액)
-        embed = discord.Embed(
-            title="⚔️ 1v1 블랙잭 대전 매칭 대기 중...",
-            description=f"**{interaction.user.mention}** 님이 **{베팅금액:,.2f} PT** 대전을 신청했습니다!\n아래 버튼을 누르면 즉시 1대1 매치가 시작됩니다.",
-            color=discord.Color.gold()
-        )
-        await interaction.response.send_message(embed=embed, view=view)
-
-
-@bot.tree.command(name="틱택토", description="틱택토 3라운드 대결을 진행합니다.")
-@app_commands.describe(
-    상대="대결 상대 선택 (봇 또는 다른 플레이어)",
-    판크기="게임판 크기를 선택하세요.",
-    난이도="[봇 대전 전용] AI 난이도"
-)
-@app_commands.choices(
-    상대=[
-        app_commands.Choice(name="🤖 봇 (AI 대전)", value="bot"),
-        app_commands.Choice(name="⚔️ 플레이어 대전 (1v1 매칭)", value="player")
-    ],
-    판크기=[
-        app_commands.Choice(name="3x3 (기본)", value="3"),
-        app_commands.Choice(name="6x6 (확장)", value="6")
-    ],
-    난이도=[
-        app_commands.Choice(name="쉬움", value="easy"),
-        app_commands.Choice(name="보통", value="normal"),
-        app_commands.Choice(name="어려움", value="hard")
-    ]
-)
-async def tictactoe_start(
-    interaction: discord.Interaction, 
-    상대: app_commands.Choice[str],
-    판크기: app_commands.Choice[str], 
-    난이도: app_commands.Choice[str] = None
-):
-    size = int(판크기.value)
-
-    if 상대.value == "bot":
-        diff = 난이도.value if 난이도 else "normal"
-        from __main__ import TicTacToeView # 기존 싱글 View 호출
-        view = TicTacToeView(interaction.user, size, diff)
-        embed = view.make_embed("게임이 시작되었습니다! 먼저 ❌를 둘 위치를 선택하세요.")
-        await interaction.response.send_message(embed=embed, view=view)
-    else:
-        view = MatchWaitView(interaction.user, game_type="tictactoe", size=size)
-        embed = discord.Embed(
-            title="⚔️ 1v1 틱택토 대전 매칭 대기 중...",
-            description=f"**{interaction.user.mention}** 님이 **{size}x{size}** 대전을 신청했습니다!\n아래 버튼을 누르면 즉시 1대1 매치가 시작됩니다.",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, view=view)
-
-
-# --------------------------------------------------
-# [기존 틱택토 봇 전용 클래스 및 기타 시스템 유지]
+# [틱택토 - 봇(AI) 대전 View]
 # --------------------------------------------------
 class TicTacToeButton(discord.ui.Button):
     def __init__(self, x: int, y: int):
@@ -683,9 +622,15 @@ class TicTacToeView(discord.ui.View):
     async def next_round(self, interaction: discord.Interaction, round_msg: str):
         if self.p_wins == 2 or self.b_wins == 2 or self.current_round == 3:
             for item in self.children: item.disabled = True
-            if self.p_wins > self.b_wins: final_msg = "🏆 **최종 승리! 플레이어가 대결에서 이겼습니다!**"
-            elif self.b_wins > self.p_wins: final_msg = "💀 **최종 패배! AI가 대결에서 이겼습니다!**"
-            else: final_msg = "🤝 **최종 무승부! 경기 결과가 비겼습니다.**"
+            if self.p_wins > self.b_wins:
+                final_msg = "🏆 **최종 승리! 플레이어가 대결에서 이겼습니다!**"
+                self.record_result(self.player.id, "win")
+            elif self.b_wins > self.p_wins:
+                final_msg = "💀 **최종 패배! AI가 대결에서 이겼습니다!**"
+                self.record_result(self.player.id, "loss")
+            else:
+                final_msg = "🤝 **최종 무승부! 경기 결과가 비겼습니다.**"
+                self.record_result(self.player.id, "draw")
             embed = self.make_embed(f"{round_msg}\n\n{final_msg}")
             await interaction.response.edit_message(embed=embed, view=self)
             self.stop()
@@ -695,19 +640,461 @@ class TicTacToeView(discord.ui.View):
             embed = self.make_embed(f"{round_msg}\n\n➡️ **{self.current_round}라운드를 시작합니다!**")
             await interaction.response.edit_message(embed=embed, view=self)
 
+    def record_result(self, user_id: int, result: str):
+        cursor.execute('SELECT wins, losses, draws FROM tictactoe_stats WHERE user_id = ?', (user_id,))
+        row = cursor.fetchone()
+
+        if row is None:
+            w, l, d = (1 if result == "win" else 0, 1 if result == "loss" else 0, 1 if result == "draw" else 0)
+            cursor.execute('INSERT INTO tictactoe_stats (user_id, wins, losses, draws) VALUES (?, ?, ?, ?)',
+                           (user_id, w, l, d))
+        else:
+            w, l, d = row
+            if result == "win": w += 1
+            elif result == "loss": l += 1
+            elif result == "draw": d += 1
+            cursor.execute('UPDATE tictactoe_stats SET wins = ?, losses = ?, draws = ? WHERE user_id = ?',
+                           (w, l, d, user_id))
+        conn.commit()
+
 # --------------------------------------------------
-# [포인트 및 기존 유틸리티 명령어 모음]
+# [슬래시 명령어] 게임 시작 명령어
 # --------------------------------------------------
-@bot.tree.command(name="포인트", description="포인트를 확인합니다.")
+
+@bot.tree.command(name="블랙잭", description="포인트를 걸고 블랙잭 게임을 합니다.")
+@app_commands.describe(
+    상대="대결 상대 선택 (봇 또는 다른 플레이어)",
+    베팅금액="베팅할 포인트 금액 (최소 10 PT 이상)"
+)
+@app_commands.choices(
+    상대=[
+        app_commands.Choice(name="🤖 봇 (AI 대전)", value="bot"),
+        app_commands.Choice(name="⚔️ 플레이어 대전 (1v1 매칭)", value="player")
+    ]
+)
+async def blackjack_start(interaction: discord.Interaction, 상대: app_commands.Choice[str], 베팅금액: float):
+    베팅금액 = round(베팅금액, 2)
+    if 베팅금액 < 10.0:
+        await interaction.response.send_message("❌ 블랙잭은 최소 **10 PT**부터 시작할 수 있습니다.", ephemeral=True)
+        return
+
+    cursor.execute('SELECT points FROM users WHERE user_id = ?', (interaction.user.id,))
+    row = cursor.fetchone()
+    current_pts = float(row[0]) if row else 0.0
+
+    if current_pts < 베팅금액:
+        await interaction.response.send_message(f"❌ 포인트가 부족합니다. (현재 보유: **{current_pts:,.2f}** PT)", ephemeral=True)
+        return
+
+    if 상대.value == "bot":
+        view = BlackjackBotView(interaction.user, 베팅금액)
+        embed = view.make_embed()
+        await interaction.response.send_message(embed=embed, view=view)
+    else:
+        view = MatchWaitView(interaction.user, game_type="blackjack", bet=베팅금액)
+        embed = discord.Embed(
+            title="⚔️ 1v1 블랙잭 대전 매칭 대기 중...",
+            description=f"**{interaction.user.mention}** 님이 **{베팅금액:,.2f} PT** 대전을 신청했습니다!\n아래 버튼을 누르면 즉시 1대1 매치가 시작됩니다.",
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(embed=embed, view=view)
+
+
+@bot.tree.command(name="블랙잭설명", description="블랙잭 게임의 규칙 및 이용법을 확인합니다.")
+async def blackjack_info(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🃏 블랙잭 게임 가이드 및 규칙",
+        description="카드의 합이 **100**을 초과하지 않으면서 상대보다 **100에 가까운 점수**를 만들면 승리하는 게임입니다.",
+        color=discord.Color.gold()
+    )
+    embed.add_field(
+        name="📌 주요 규칙 요약",
+        value=(
+            "• **최소 베팅금:** `10 PT` 이상부터 사용 가능\n"
+            "• **상대 선택:** AI 봇 대전 또는 플레이어간 1v1 대전 선택 가능\n"
+            "• **히트 (Hit):** 카드를 1장 더 뽑습니다.\n"
+            "• **스탠드 (Stand):** 현재 카드로 점수를 겨룹니다.\n"
+            "• **딜러 AI 규칙:** 딜러는 점수가 `85점` 이상이 될 때까지 자동으로 카드를 뽑습니다."
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🔢 카드 점수 계산법",
+        value=(
+            "• **2 ~ 10:** 카드 표기 숫자 그대로 계산\n"
+            "• **J, Q, K:** 각각 `10점`으로 계산\n"
+            "• **A (Ace):** 100점을 넘지 않으면 `11점`, 넘어가면 `1점`으로 자동 변경"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="💰 승패 및 포인트 배율",
+        value=(
+            "• **승리:** 베팅금의 **2배**를 획득합니다!\n"
+            "• **무승부:** 베팅금을 그대로 돌려받습니다.\n"
+            "• **AI전 패배:** 현재 보유 포인트의 **절반(50%)**이 차감됩니다!"
+        ),
+        inline=False
+    )
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="틱택토", description="틱택토 3라운드 대결을 진행합니다.")
+@app_commands.describe(
+    상대="대결 상대 선택 (봇 또는 다른 플레이어)",
+    판크기="게임판 크기를 선택하세요.",
+    난이도="[봇 대전 전용] AI 난이도"
+)
+@app_commands.choices(
+    상대=[
+        app_commands.Choice(name="🤖 봇 (AI 대전)", value="bot"),
+        app_commands.Choice(name="⚔️ 플레이어 대전 (1v1 매칭)", value="player")
+    ],
+    판크기=[
+        app_commands.Choice(name="3x3 (기본)", value="3"),
+        app_commands.Choice(name="6x6 (확장)", value="6")
+    ],
+    난이도=[
+        app_commands.Choice(name="쉬움", value="easy"),
+        app_commands.Choice(name="보통", value="normal"),
+        app_commands.Choice(name="어려움", value="hard")
+    ]
+)
+async def tictactoe_start(
+    interaction: discord.Interaction, 
+    상대: app_commands.Choice[str],
+    판크기: app_commands.Choice[str], 
+    난이도: app_commands.Choice[str] = None
+):
+    size = int(판크기.value)
+
+    if 상대.value == "bot":
+        diff = 난이도.value if 난이도 else "normal"
+        view = TicTacToeView(interaction.user, size, diff)
+        embed = view.make_embed("게임이 시작되었습니다! 먼저 ❌를 둘 위치를 선택하세요.")
+        await interaction.response.send_message(embed=embed, view=view)
+    else:
+        view = MatchWaitView(interaction.user, game_type="tictactoe", size=size)
+        embed = discord.Embed(
+            title="⚔️ 1v1 틱택토 대전 매칭 대기 중...",
+            description=f"**{interaction.user.mention}** 님이 **{size}x{size}** 대전을 신청했습니다!\n아래 버튼을 누르면 즉시 1대1 매치가 시작됩니다.",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, view=view)
+
+
+@bot.tree.command(name="틱택토승률", description="나 또는 다른 유저의 틱택토 전적 및 승률을 조회합니다.")
+@app_commands.describe(유저="전적을 조회할 유저 (선택)")
+async def tictactoe_stats(interaction: discord.Interaction, 유저: discord.User = None):
+    target = 유저 or interaction.user
+
+    cursor.execute('SELECT wins, losses, draws FROM tictactoe_stats WHERE user_id = ?', (target.id,))
+    row = cursor.fetchone()
+
+    wins, losses, draws = row if row else (0, 0, 0)
+    total_games = wins + losses + draws
+    win_rate = (wins / total_games * 100) if total_games > 0 else 0.0
+
+    embed = discord.Embed(title="📊 틱택토 전적 정보", color=discord.Color.purple())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="유저", value=target.mention, inline=False)
+    embed.add_field(name="총 경기 수", value=f"**{total_games}전**", inline=True)
+    embed.add_field(name="승 / 패 / 무", value=f"**{wins}승 {losses}패 {draws}무**", inline=True)
+    embed.add_field(name="승률", value=f"**{win_rate:.1f}%**", inline=False)
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+# --------------------------------------------------
+# [관리자 전용] 포인트 지급 & 차감
+# --------------------------------------------------
+
+@bot.tree.command(name="포인트지급", description="[관리자 전용] 지정한 유저에게 포인트를 지급합니다.")
+@app_commands.describe(유저="포인트를 받게 될 유저", 지급액="지급할 포인트 양")
+@app_commands.checks.has_permissions(administrator=True)
+async def give_points(interaction: discord.Interaction, 유저: discord.Member, 지급액: float):
+    if 지급액 <= 0:
+        await interaction.response.send_message("❌ 지급할 포인트는 0보다 커야 합니다.", ephemeral=True)
+        return
+
+    지급액 = round(지급액, 2)
+    cursor.execute('SELECT points FROM users WHERE user_id = ?', (유저.id,))
+    result = cursor.fetchone()
+
+    if result is None:
+        new_points = 지급액
+        cursor.execute('INSERT INTO users (user_id, points, last_chat) VALUES (?, ?, ?)', (유저.id, new_points, time.time()))
+    else:
+        new_points = round(result[0] + 지급액, 2)
+        cursor.execute('UPDATE users SET points = ? WHERE user_id = ?', (new_points, 유저.id))
+
+    conn.commit()
+
+    embed = discord.Embed(title="🪙 포인트 지급 완료", color=discord.Color.gold())
+    embed.set_thumbnail(url=유저.display_avatar.url)
+    embed.add_field(name="지급 대상", value=유저.mention, inline=True)
+    embed.add_field(name="지급 금액", value=f"**+{지급액:,.2f}** PT", inline=True)
+    embed.add_field(name="보유 포인트", value=f"**{new_points:,.2f}** PT", inline=False)
+    embed.set_footer(text=f"처리자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="포인트차감", description="[관리자 전용] 지정한 유저의 포인트를 차감합니다.")
+@app_commands.describe(유저="포인트를 차감할 유저", 차감액="차감할 포인트 양")
+@app_commands.checks.has_permissions(administrator=True)
+async def remove_points(interaction: discord.Interaction, 유저: discord.Member, 차감액: float):
+    if 차감액 <= 0:
+        await interaction.response.send_message("❌ 차감할 포인트는 0보다 커야 합니다.", ephemeral=True)
+        return
+
+    차감액 = round(차감액, 2)
+    cursor.execute('SELECT points FROM users WHERE user_id = ?', (유저.id,))
+    result = cursor.fetchone()
+
+    current_points = float(result[0]) if result else 0.0
+    new_points = max(0.0, round(current_points - 차감액, 2))
+
+    cursor.execute('INSERT INTO users (user_id, points, last_chat) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET points = ?', 
+                   (유저.id, new_points, time.time(), new_points))
+    conn.commit()
+
+    embed = discord.Embed(title="🔻 포인트 차감 완료", color=discord.Color.red())
+    embed.set_thumbnail(url=유저.display_avatar.url)
+    embed.add_field(name="차감 대상", value=유저.mention, inline=True)
+    embed.add_field(name="차감 금액", value=f"**-{차감액:,.2f}** PT", inline=True)
+    embed.add_field(name="현재 보유 포인트", value=f"**{new_points:,.2f}** PT", inline=False)
+    embed.set_footer(text=f"처리자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+# --------------------------------------------------
+# [기타 서버 관리 & 유틸리티 명령어 모음]
+# --------------------------------------------------
+
+class PollView(discord.ui.View):
+    def __init__(self, topic, option1, option2):
+        super().__init__(timeout=None)
+        self.topic = topic
+        self.option1 = option1
+        self.option2 = option2
+        self.votes = {}
+
+        self.btn1 = discord.ui.Button(label=f"1. {option1} (0표)", style=discord.ButtonStyle.primary, custom_id="poll_opt1")
+        self.btn1.callback = self.on_btn1_click
+        self.add_item(self.btn1)
+
+        self.btn2 = discord.ui.Button(label=f"2. {option2} (0표)", style=discord.ButtonStyle.success, custom_id="poll_opt2")
+        self.btn2.callback = self.on_btn2_click
+        self.add_item(self.btn2)
+
+    async def update_poll(self, interaction: discord.Interaction):
+        count1 = list(self.votes.values()).count(1)
+        count2 = list(self.votes.values()).count(2)
+
+        self.btn1.label = f"1. {self.option1} ({count1}표)"
+        self.btn2.label = f"2. {self.option2} ({count2}표)"
+
+        embed = interaction.message.embeds[0]
+        embed.set_field_at(0, name=f"1️⃣ {self.option1}", value=f"**{count1}표**", inline=True)
+        embed.set_field_at(1, name=f"2️⃣ {self.option2}", value=f"**{count2}표**", inline=True)
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_btn1_click(self, interaction: discord.Interaction):
+        self.votes[interaction.user.id] = 1
+        await self.update_poll(interaction)
+
+    async def on_btn2_click(self, interaction: discord.Interaction):
+        self.votes[interaction.user.id] = 2
+        await self.update_poll(interaction)
+
+
+@bot.tree.command(name="경고", description="유저에게 경고를 부여합니다.")
+@app_commands.describe(유저="경고를 줄 유저", 횟수="부여할 경고 횟수 (기본값: 1)", 사유="경고 사유 (선택)")
+@app_commands.checks.has_permissions(administrator=True)
+async def give_warning(interaction: discord.Interaction, 유저: discord.Member, 횟수: int = 1, 사유: str = "사유 미기재"):
+    if 횟수 <= 0:
+        await interaction.response.send_message("❌ 경고 횟수는 1회 이상이어야 합니다.", ephemeral=True)
+        return
+
+    cursor.execute('SELECT warnings FROM warnings WHERE user_id = ?', (유저.id,))
+    result = cursor.fetchone()
+
+    if result is None:
+        new_warns = 횟수
+        cursor.execute('INSERT INTO warnings (user_id, warnings) VALUES (?, ?)', (유저.id, new_warns))
+    else:
+        new_warns = result[0] + 횟수
+        cursor.execute('UPDATE warnings SET warnings = ? WHERE user_id = ?', (new_warns, 유저.id))
+    
+    conn.commit()
+
+    embed = discord.Embed(title="⚠️ 경고 부여", color=discord.Color.red())
+    embed.add_field(name="대상 유저", value=유저.mention, inline=True)
+    embed.add_field(name="부여된 경고", value=f"**+{횟수}회**", inline=True)
+    embed.add_field(name="누적 경고", value=f"**{new_warns}회**", inline=True)
+    embed.add_field(name="사유", value=사유, inline=False)
+    embed.set_footer(text=f"처리자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="경고차감", description="유저의 경고를 차감합니다.")
+@app_commands.describe(유저="경고를 차감할 유저", 횟수="차감할 경고 횟수")
+@app_commands.checks.has_permissions(administrator=True)
+async def remove_warning(interaction: discord.Interaction, 유저: discord.Member, 횟수: int):
+    if 횟수 <= 0:
+        await interaction.response.send_message("❌ 차감할 횟수는 1회 이상이어야 합니다.", ephemeral=True)
+        return
+
+    cursor.execute('SELECT warnings FROM warnings WHERE user_id = ?', (유저.id,))
+    result = cursor.fetchone()
+
+    current_warns = result[0] if result else 0
+    new_warns = max(0, current_warns - 횟수)
+
+    cursor.execute('INSERT INTO warnings (user_id, warnings) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET warnings = ?', 
+                   (유저.id, new_warns, new_warns))
+    conn.commit()
+
+    embed = discord.Embed(title="🟢 경고 차감", color=discord.Color.green())
+    embed.add_field(name="대상 유저", value=유저.mention, inline=True)
+    embed.add_field(name="차감된 경고", value=f"**-{횟수}회**", inline=True)
+    embed.add_field(name="현재 누적 경고", value=f"**{new_warns}회**", inline=True)
+    embed.set_footer(text=f"처리자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="경고수", description="나 또는 다른 유저의 누적 경고 수를 확인합니다.")
+@app_commands.describe(유저="경고를 조회할 유저 (선택)")
+async def check_warning(interaction: discord.Interaction, 유저: discord.User = None):
+    target = 유저 or interaction.user
+
+    cursor.execute('SELECT warnings FROM warnings WHERE user_id = ?', (target.id,))
+    result = cursor.fetchone()
+    warns = result[0] if result else 0
+
+    embed = discord.Embed(title="🚨 경고 조회", color=discord.Color.orange())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="유저", value=target.mention, inline=True)
+    embed.add_field(name="누적 경고", value=f"**{warns}회**", inline=True)
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="유저정보", description="유저의 정보를 확인합니다.")
+@app_commands.describe(유저="정보를 확인할 유저")
+async def 유저정보(interaction: discord.Interaction, 유저: discord.Member = None):
+    await interaction.response.defer()
+
+    if 유저 is None:
+        유저 = interaction.user
+
+    embed = discord.Embed(title="👤 유저 정보", color=discord.Color.blue())
+    embed.set_thumbnail(url=유저.display_avatar.url)
+    embed.add_field(name="📛 닉네임", value=유저.display_name, inline=False)
+    embed.add_field(name="🆔 사용자 ID", value=str(유저.id), inline=False)
+    embed.add_field(name="🤖 봇 여부", value="예" if 유저.bot else "아니오", inline=False)
+    
+    if 유저.joined_at:
+        embed.add_field(name="📅 서버 가입일", value=유저.joined_at.strftime("%Y-%m-%d %H:%M"), inline=False)
+
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="투표", description="간단한 투표를 진행합니다.")
+@app_commands.describe(주제="투표 주제를 입력하세요", 항목1="첫 번째 선택지", 항목2="두 번째 선택지")
+async def 투표(interaction: discord.Interaction, 주제: str, 항목1: str, 항목2: str):
+    embed = discord.Embed(title=f"📊 투표: {주제}", description="아래 버튼을 눌러 투표에 참여하세요!", color=discord.Color.gold())
+    embed.add_field(name=f"1️⃣ {항목1}", value="**0표**", inline=True)
+    embed.add_field(name=f"2️⃣ {항목2}", value="**0표**", inline=True)
+    embed.set_footer(text=f"투표 발의자: {interaction.user.display_name}")
+
+    view = PollView(주제, 항목1, 항목2)
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+@bot.tree.command(name="골라줘", description="3개의 항목 중 1개를 랜덤으로 골라줍니다.")
+@app_commands.describe(항목1="첫 번째 선택지", 항목2="두 번째 선택지", 항목3="세 번째 선택지")
+async def 골라줘(interaction: discord.Interaction, 항목1: str, 항목2: str, 항목3: str):
+    await interaction.response.defer()
+
+    options = [항목1, 항목2, 항목3]
+    selected = random.choice(options)
+
+    embed = discord.Embed(title="🎲 고르기 결과!", description="고민하지 마세요! 봇의 선택은 바로...", color=discord.Color.green())
+    embed.add_field(name="📋 후보 목록", value=f"1. {항목1}\n2. {항목2}\n3. {항목3}", inline=False)
+    embed.add_field(name="✨ 당첨!", value=f"👉 **{selected}**", inline=False)
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="공지", description="공지사항을 작성합니다.")
+@app_commands.describe(제목="공지 제목", 내용="공지 내용")
+@app_commands.checks.has_permissions(administrator=True)
+async def notice(interaction: discord.Interaction, 제목: str, 내용: str):
+    embed = discord.Embed(title=f"📢 {제목}", description=내용, color=discord.Color.blue())
+    embed.set_footer(text=f"작성자 : {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+    embed.timestamp = discord.utils.utcnow()
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="업데이트", description="업데이트 공지를 작성합니다.")
+@app_commands.describe(제목="업데이트 제목", 내용="업데이트 내용")
+@app_commands.checks.has_permissions(administrator=True)
+async def update(interaction: discord.Interaction, 제목: str, 내용: str):
+    embed = discord.Embed(title=f"🛠️ {제목}", description=내용, color=discord.Color.green())
+    embed.set_footer(text=f"작성자 : {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+    embed.timestamp = discord.utils.utcnow()
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="포인트", description="나 또는 다른 유저의 포인트를 확인합니다.")
+@app_commands.describe(유저="포인트를 조회할 유저 (선택)")
 async def check_points(interaction: discord.Interaction, 유저: discord.User = None):
     target = 유저 or interaction.user
+
     cursor.execute('SELECT points FROM users WHERE user_id = ?', (target.id,))
     result = cursor.fetchone()
     pts = float(result[0]) if result else 0.0
-    await interaction.response.send_message(f"🪙 **{target.display_name}** 님의 보유 포인트: **{pts:,.2f}** PT")
+
+    embed = discord.Embed(title="🪙 포인트 정보", color=discord.Color.gold())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="유저", value=target.mention, inline=True)
+    embed.add_field(name="보유 포인트", value=f"**{pts:,.2f}** PT", inline=True)
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="랭킹", description="포인트 순위 Top 10을 확인합니다.")
+async def show_leaderboard(interaction: discord.Interaction):
+    cursor.execute('SELECT user_id, points FROM users ORDER BY points DESC LIMIT 10')
+    rows = cursor.fetchall()
+
+    if not rows:
+        await interaction.response.send_message("아직 등록된 포인트 데이터가 없습니다.")
+        return
+
+    embed = discord.Embed(title="🏆 포인트 랭킹 Top 10", color=discord.Color.gold())
+    
+    rank_text = ""
+    for idx, (user_id, pts) in enumerate(rows, start=1):
+        medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"`{idx}.`"
+        rank_text += f"{medal} <@{user_id}> - **{float(pts):,.2f}** PT\n"
+
+    embed.description = rank_text
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
 
 # --------------------------------------------------
-# [실행]
+# [봇 실행]
 # --------------------------------------------------
 if TOKEN:
     keep_alive()
