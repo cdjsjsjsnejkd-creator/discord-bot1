@@ -25,7 +25,6 @@ def keep_alive():
     t = Thread(target=run_web)
     t.start()
 
-# Render 환경변수에서 토큰 가져오기
 TOKEN = os.getenv("TOKEN")
 
 # --------------------------------------------------
@@ -43,17 +42,27 @@ cursor.execute('''
     )
 ''')
 
-# 2. 경고 테이블 (추가됨)
+# 2. 경고 테이블
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS warnings (
         user_id INTEGER PRIMARY KEY,
         warnings INTEGER DEFAULT 0
     )
 ''')
+
+# 3. 틱택토 전적 테이블 (추가됨)
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS tictactoe_stats (
+        user_id INTEGER PRIMARY KEY,
+        wins INTEGER DEFAULT 0,
+        losses INTEGER DEFAULT 0,
+        draws INTEGER DEFAULT 0
+    )
+''')
 conn.commit()
 
 # --------------------------------------------------
-# [Intents 설정] 채팅 감지를 위해 message_content 필수
+# [Intents 설정]
 # --------------------------------------------------
 intents = discord.Intents.default()
 intents.members = True
@@ -69,12 +78,6 @@ class MyBot(commands.Bot):
 
     async def on_ready(self):
         print(f"✅ 로그인 완료: {self.user}")
-
-    async def on_disconnect(self):
-        print("⚠️ 디스코드 서버와의 연결이 끊겼습니다. 재연결을 시도합니다...")
-
-    async def on_resumed(self):
-        print("🔄 디스코드 서버와 다시 연결되었습니다!")
 
 bot = MyBot()
 
@@ -111,8 +114,236 @@ async def on_message(message: discord.Message):
 
 
 # --------------------------------------------------
-# [기능 1] 투표용 버튼 뷰(View) 클래스
+# [신규 기능] 틱택토 게임 로직 및 View
 # --------------------------------------------------
+
+class TicTacToeButton(discord.ui.Button):
+    def __init__(self, x: int, y: int):
+        super().__init__(style=discord.ButtonStyle.secondary, label="\u200b", row=y)
+        self.x = x
+        self.y = y
+
+    async def callback(self, interaction: discord.Interaction):
+        assert self.view is not None
+        view: TicTacToeView = self.view
+
+        if interaction.user != view.player:
+            await interaction.response.send_message("❌ 당신의 게임이 아닙니다!", ephemeral=True)
+            return
+
+        if view.board[self.y][self.x] != 0:
+            await interaction.response.send_message("❌ 이미 선택된 칸입니다!", ephemeral=True)
+            return
+
+        # 유저 턴 (❌ 표시)
+        view.board[self.y][self.x] = 1
+        self.style = discord.ButtonStyle.danger
+        self.label = "❌"
+        self.disabled = True
+
+        # 라운드 승패 판정 (유저 승리 체크)
+        if view.check_winner(1):
+            view.p_wins += 1
+            await view.next_round(interaction, f"🎉 **{view.current_round}라운드 승리!**")
+            return
+
+        # 무승부 체크
+        if view.is_board_full():
+            await view.next_round(interaction, f"🤝 **{view.current_round}라운드 무승부!**")
+            return
+
+        # AI 턴 (⭕ 표시)
+        view.bot_move()
+
+        # AI 승리 체크
+        if view.check_winner(2):
+            view.b_wins += 1
+            await view.next_round(interaction, f"🤖 **{view.current_round}라운드 AI 승리!**")
+            return
+
+        if view.is_board_full():
+            await view.next_round(interaction, f"🤝 **{view.current_round}라운드 무승부!**")
+            return
+
+        await interaction.response.edit_message(embed=view.make_embed(), view=view)
+
+
+class TicTacToeView(discord.ui.View):
+    def __init__(self, player: discord.User, size: int):
+        super().__init__(timeout=180)
+        self.player = player
+        self.size = size  # 3 또는 6
+        self.win_req = 3 if size == 3 else 4  # 승리 조건 (3x3은 3줄, 6x6은 4줄 연속)
+        
+        self.current_round = 1
+        self.p_wins = 0
+        self.b_wins = 0
+
+        self.reset_board()
+
+    def reset_board(self):
+        self.clear_items()
+        self.board = [[0 for _ in range(self.size)] for _ in range(self.size)]
+        
+        # 3x3은 9개 버튼, 6x6은 25개 한계(디스코드 버그 방지)로 5x5 배치 방식 활용
+        for y in range(self.size):
+            for x in range(self.size):
+                if self.size == 6 and (x >= 5 or y >= 5): 
+                    continue # 디스코드 버튼 최대 25개 제한으로 5x5 그리드로 자동 보정
+                self.add_item(TicTacToeButton(x, y))
+
+    def is_board_full(self) -> bool:
+        max_limit = min(self.size, 5)
+        for y in range(max_limit):
+            for x in range(max_limit):
+                if self.board[y][x] == 0:
+                    return False
+        return True
+
+    def check_winner(self, mark: int) -> bool:
+        limit = min(self.size, 5)
+        req = self.win_req
+
+        # 가로, 세로, 대각선 체크
+        for r in range(limit):
+            for c in range(limit):
+                # 가로
+                if c + req <= limit and all(self.board[r][c+i] == mark for i in range(req)):
+                    return True
+                # 세로
+                if r + req <= limit and all(self.board[r+i][c] == mark for i in range(req)):
+                    return True
+                # 대각선 ↘
+                if r + req <= limit and c + req <= limit and all(self.board[r+i][c+i] == mark for i in range(req)):
+                    return True
+                # 대각선 ↙
+                if r + req <= limit and c - req + 1 >= 0 and all(self.board[r+i][c-i] == mark for i in range(req)):
+                    return True
+        return False
+
+    def bot_move(self):
+        empty_cells = []
+        limit = min(self.size, 5)
+        for y in range(limit):
+            for x in range(limit):
+                if self.board[y][x] == 0:
+                    empty_cells.append((x, y))
+
+        if not empty_cells:
+            return
+
+        # AI 알고리즘: 기본 랜덤
+        x, y = random.choice(empty_cells)
+        self.board[y][x] = 2
+
+        # 버튼 상태 업데이트
+        for item in self.children:
+            if isinstance(item, TicTacToeButton) and item.x == x and item.y == y:
+                item.style = discord.ButtonStyle.success
+                item.label = "⭕"
+                item.disabled = True
+                break
+
+    def make_embed(self, msg: str = "") -> discord.Embed:
+        embed = discord.Embed(
+            title=f"🎮 틱택토 ({self.size}x{self.size}) - {self.current_round}/3 라운드",
+            color=discord.Color.blue()
+        )
+        embed.description = f"{msg}\n\n👤 **{self.player.display_name}**: `{self.p_wins}승` | 🤖 **AI**: `{self.b_wins}승`"
+        embed.set_footer(text="❌ : 유저 | ⭕ : AI")
+        return embed
+
+    async def next_round(self, interaction: discord.Interaction, round_msg: str):
+        # 매 라운드 종료 조건 체크 (3판 진행 또는 누군가 2승 달성)
+        if self.p_wins == 2 or self.b_wins == 2 or self.current_round == 3:
+            # 게임 최종 종료
+            for item in self.children:
+                item.disabled = True
+
+            final_msg = ""
+            if self.p_wins > self.b_wins:
+                final_msg = "🏆 **최종 승리! 플레이어가 대결에서 이겼습니다!**"
+                self.record_result(self.player.id, "win")
+            elif self.b_wins > self.p_wins:
+                final_msg = "💀 **최종 패배! AI가 대결에서 이겼습니다!**"
+                self.record_result(self.player.id, "loss")
+            else:
+                final_msg = "🤝 **최종 무승부! 경기 결과가 비겼습니다.**"
+                self.record_result(self.player.id, "draw")
+
+            embed = self.make_embed(f"{round_msg}\n\n{final_msg}")
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.stop()
+        else:
+            # 다음 라운드 진행
+            self.current_round += 1
+            self.reset_board()
+            embed = self.make_embed(f"{round_msg}\n\n➡️ **{self.current_round}라운드를 시작합니다!**")
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    def record_result(self, user_id: int, result: str):
+        cursor.execute('SELECT wins, losses, draws FROM tictactoe_stats WHERE user_id = ?', (user_id,))
+        row = cursor.fetchone()
+
+        if row is None:
+            w, l, d = (1 if result == "win" else 0, 1 if result == "loss" else 0, 1 if result == "draw" else 0)
+            cursor.execute('INSERT INTO tictactoe_stats (user_id, wins, losses, draws) VALUES (?, ?, ?, ?)',
+                           (user_id, w, l, d))
+        else:
+            w, l, d = row
+            if result == "win": w += 1
+            elif result == "loss": l += 1
+            elif result == "draw": d += 1
+            cursor.execute('UPDATE tictactoe_stats SET wins = ?, losses = ?, draws = ? WHERE user_id = ?',
+                           (w, l, d, user_id))
+        conn.commit()
+
+
+# --------------------------------------------------
+# [명령어] /틱택토 및 /틱택토 승률
+# --------------------------------------------------
+
+@bot.tree.command(name="틱택토", description="AI와 틱택토 3라운드 대결을 진행합니다.")
+@app_commands.describe(난이도="게임판 크기를 선택하세요.")
+@app_commands.choices(난이도=[
+    app_commands.Choice(name="3x3 (기본)", value="3"),
+    app_commands.Choice(name="6x6 (확장)", value="6")
+])
+async def tictactoe_start(interaction: discord.Interaction, 난이도: app_commands.Choice[str]):
+    size = int(난이도.value)
+    view = TicTacToeView(interaction.user, size)
+    embed = view.make_embed("게임이 시작되었습니다! 먼저 ❌를 둘 위치를 선택하세요.")
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+@bot.tree.command(name="틱택토승률", description="나 또는 다른 유저의 틱택토 전적 및 승률을 조회합니다.")
+@app_commands.describe(유저="전적을 조회할 유저 (선택)")
+async def tictactoe_stats(interaction: discord.Interaction, 유저: discord.User = None):
+    target = 유저 or interaction.user
+
+    cursor.execute('SELECT wins, losses, draws FROM tictactoe_stats WHERE user_id = ?', (target.id,))
+    row = cursor.fetchone()
+
+    wins, losses, draws = row if row else (0, 0, 0)
+    total_games = wins + losses + draws
+
+    win_rate = (wins / total_games * 100) if total_games > 0 else 0.0
+
+    embed = discord.Embed(title="📊 틱택토 전적 정보", color=discord.Color.purple())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="유저", value=target.mention, inline=False)
+    embed.add_field(name="총 경기 수", value=f"**{total_games}전**", inline=True)
+    embed.add_field(name="승 / 패 / 무", value=f"**{wins}승 {losses}패 {draws}무**", inline=True)
+    embed.add_field(name="승률", value=f"**{win_rate:.1f}%**", inline=False)
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+
+    await interaction.response.send_message(embed=embed)
+
+
+# --------------------------------------------------
+# [기존 명령어 모음]
+# --------------------------------------------------
+
 class PollView(discord.ui.View):
     def __init__(self, topic, option1, option2):
         super().__init__(timeout=None)
@@ -151,11 +382,6 @@ class PollView(discord.ui.View):
         await self.update_poll(interaction)
 
 
-# --------------------------------------------------
-# [신규 기능] 경고 시스템 명령어 (/경고, /경고차감, /경고수)
-# --------------------------------------------------
-
-# 1. /경고 (관리자 전용)
 @bot.tree.command(name="경고", description="유저에게 경고를 부여합니다.")
 @app_commands.describe(유저="경고를 줄 유저", 횟수="부여할 경고 횟수 (기본값: 1)", 사유="경고 사유 (선택)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -186,7 +412,6 @@ async def give_warning(interaction: discord.Interaction, 유저: discord.Member,
     await interaction.response.send_message(embed=embed)
 
 
-# 2. /경고차감 (관리자 전용)
 @bot.tree.command(name="경고차감", description="유저의 경고를 차감합니다.")
 @app_commands.describe(유저="경고를 차감할 유저", 횟수="차감할 경고 횟수")
 @app_commands.checks.has_permissions(administrator=True)
@@ -199,7 +424,7 @@ async def remove_warning(interaction: discord.Interaction, 유저: discord.Membe
     result = cursor.fetchone()
 
     current_warns = result[0] if result else 0
-    new_warns = max(0, current_warns - 횟수)  # 0 이하로 내려가지 않도록 처리
+    new_warns = max(0, current_warns - 횟수)
 
     cursor.execute('INSERT INTO warnings (user_id, warnings) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET warnings = ?', 
                    (유저.id, new_warns, new_warns))
@@ -214,7 +439,6 @@ async def remove_warning(interaction: discord.Interaction, 유저: discord.Membe
     await interaction.response.send_message(embed=embed)
 
 
-# 3. /경고수 (누구나 사용 가능)
 @bot.tree.command(name="경고수", description="나 또는 다른 유저의 누적 경고 수를 확인합니다.")
 @app_commands.describe(유저="경고를 조회할 유저 (선택)")
 async def check_warning(interaction: discord.Interaction, 유저: discord.User = None):
@@ -232,10 +456,6 @@ async def check_warning(interaction: discord.Interaction, 유저: discord.User =
 
     await interaction.response.send_message(embed=embed)
 
-
-# --------------------------------------------------
-# [기존 명령어 모음]
-# --------------------------------------------------
 
 @bot.tree.command(name="유저정보", description="유저의 정보를 확인합니다.")
 @app_commands.describe(유저="정보를 확인할 유저")
@@ -261,11 +481,7 @@ async def 유저정보(interaction: discord.Interaction, 유저: discord.Member 
 @bot.tree.command(name="투표", description="간단한 투표를 진행합니다.")
 @app_commands.describe(주제="투표 주제를 입력하세요", 항목1="첫 번째 선택지", 항목2="두 번째 선택지")
 async def 투표(interaction: discord.Interaction, 주제: str, 항목1: str, 항목2: str):
-    embed = discord.Embed(
-        title=f"📊 투표: {주제}",
-        description="아래 버튼을 눌러 투표에 참여하세요!",
-        color=discord.Color.gold()
-    )
+    embed = discord.Embed(title=f"📊 투표: {주제}", description="아래 버튼을 눌러 투표에 참여하세요!", color=discord.Color.gold())
     embed.add_field(name=f"1️⃣ {항목1}", value="**0표**", inline=True)
     embed.add_field(name=f"2️⃣ {항목2}", value="**0표**", inline=True)
     embed.set_footer(text=f"투표 발의자: {interaction.user.display_name}")
@@ -282,11 +498,7 @@ async def 골라줘(interaction: discord.Interaction, 항목1: str, 항목2: str
     options = [항목1, 항목2, 항목3]
     selected = random.choice(options)
 
-    embed = discord.Embed(
-        title="🎲 고르기 결과!",
-        description="고민하지 마세요! 봇의 선택은 바로...",
-        color=discord.Color.green()
-    )
+    embed = discord.Embed(title="🎲 고르기 결과!", description="고민하지 마세요! 봇의 선택은 바로...", color=discord.Color.green())
     embed.add_field(name="📋 후보 목록", value=f"1. {항목1}\n2. {항목2}\n3. {항목3}", inline=False)
     embed.add_field(name="✨ 당첨!", value=f"👉 **{selected}**", inline=False)
     embed.set_footer(text=f"요청자: {interaction.user.display_name}")
@@ -298,17 +510,9 @@ async def 골라줘(interaction: discord.Interaction, 항목1: str, 항목2: str
 @app_commands.describe(제목="공지 제목", 내용="공지 내용")
 @app_commands.checks.has_permissions(administrator=True)
 async def notice(interaction: discord.Interaction, 제목: str, 내용: str):
-    embed = discord.Embed(
-        title=f"📢 {제목}",
-        description=내용,
-        color=discord.Color.blue()
-    )
-    embed.set_footer(
-        text=f"작성자 : {interaction.user.display_name}",
-        icon_url=interaction.user.display_avatar.url
-    )
+    embed = discord.Embed(title=f"📢 {제목}", description=내용, color=discord.Color.blue())
+    embed.set_footer(text=f"작성자 : {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
     embed.timestamp = discord.utils.utcnow()
-
     await interaction.response.send_message(embed=embed)
 
 
@@ -316,17 +520,9 @@ async def notice(interaction: discord.Interaction, 제목: str, 내용: str):
 @app_commands.describe(제목="업데이트 제목", 내용="업데이트 내용")
 @app_commands.checks.has_permissions(administrator=True)
 async def update(interaction: discord.Interaction, 제목: str, 내용: str):
-    embed = discord.Embed(
-        title=f"🛠️ {제목}",
-        description=내용,
-        color=discord.Color.green()
-    )
-    embed.set_footer(
-        text=f"작성자 : {interaction.user.display_name}",
-        icon_url=interaction.user.display_avatar.url
-    )
+    embed = discord.Embed(title=f"🛠️ {제목}", description=내용, color=discord.Color.green())
+    embed.set_footer(text=f"작성자 : {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
     embed.timestamp = discord.utils.utcnow()
-
     await interaction.response.send_message(embed=embed)
 
 
@@ -370,7 +566,7 @@ async def show_leaderboard(interaction: discord.Interaction):
 
 
 # --------------------------------------------------
-# [실행] 웹 서버와 봇을 동시에 실행
+# [실행]
 # --------------------------------------------------
 if TOKEN:
     keep_alive()
