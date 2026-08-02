@@ -23,6 +23,7 @@ def run_web():
 
 def keep_alive():
     t = Thread(target=run_web)
+    t.daemon = True
     t.start()
 
 TOKEN = os.getenv("TOKEN")
@@ -30,7 +31,7 @@ TOKEN = os.getenv("TOKEN")
 # --------------------------------------------------
 # [DB 설정] SQLite 데이터베이스 연결 및 테이블 생성
 # --------------------------------------------------
-conn = sqlite3.connect('points.db')
+conn = sqlite3.connect('points.db', check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute('''
@@ -678,7 +679,6 @@ async def blackjack_start(interaction: discord.Interaction, 상대: app_commands
         await interaction.response.send_message("❌ 블랙잭은 최소 **10 PT**부터 시작할 수 있습니다.", ephemeral=True)
         return
 
-    # 🤖 AI(봇) 대전일 경우 50 PT 제한 체크
     if 상대.value == "bot" and 베팅금액 > 50.0:
         await interaction.response.send_message("❌ 봇(AI) 대전은 최대 **50 PT**까지만 베팅할 수 있습니다!", ephemeral=True)
         return
@@ -1101,8 +1101,9 @@ async def show_leaderboard(interaction: discord.Interaction):
 # --------------------------------------------------
 # [봇 실행]
 # --------------------------------------------------
-if TOKEN:
-    keep_alive()
-    bot.run(TOKEN)
-else:
-    print("❌ 에러: TOKEN 환경변수가 설정되지 않았증니다.")
+if __name__ == "__main__":
+    if TOKEN:
+        keep_alive()
+        bot.run(TOKEN)
+    else:
+        print("❌ 에러: TOKEN 환경변수가 설정되지 않았습니다.")
