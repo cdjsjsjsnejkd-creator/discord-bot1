@@ -111,7 +111,158 @@ async def on_message(message: discord.Message):
 
 
 # --------------------------------------------------
-# [신규 기능] 틱택토 게임 로직 및 View
+# [신규 미니게임] 블랙잭 (패배 시 1.5배 손실)
+# --------------------------------------------------
+
+SUITS = ['♠️', '♥️', '♦️', '♣️']
+RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+
+def calculate_score(cards):
+    score = 0
+    aces = 0
+    for suit, rank in cards:
+        if rank in ['J', 'Q', 'K']:
+            score += 10
+        elif rank == 'A':
+            aces += 1
+            score += 11
+        else:
+            score += int(rank)
+
+    while score > 21 and aces:
+        score -= 10
+        aces -= 1
+    return score
+
+def render_cards(cards):
+    return " ".join([f"`{suit}{rank}`" for suit, rank in cards])
+
+class BlackjackView(discord.ui.View):
+    def __init__(self, player: discord.User, bet: int):
+        super().__init__(timeout=60)
+        self.player = player
+        self.bet = bet
+        self.deck = [(s, r) for s in SUITS for r in RANKS]
+        random.shuffle(self.deck)
+
+        self.player_hand = [self.deck.pop(), self.deck.pop()]
+        self.dealer_hand = [self.deck.pop(), self.deck.pop()]
+
+    def make_embed(self, title="🃏 블랙잭 진행 중", end=False):
+        p_score = calculate_score(self.player_hand)
+        d_score = calculate_score(self.dealer_hand)
+
+        embed = discord.Embed(title=title, color=discord.Color.gold() if not end else discord.Color.dark_purple())
+        embed.set_author(name=self.player.display_name, icon_url=self.player.display_avatar.url)
+        embed.add_field(name="💰 베팅금액", value=f"**{self.bet:,}** PT (패배 시 **{int(self.bet * 1.5):,}** PT 손실)", inline=False)
+        
+        embed.add_field(name=f"👤 플레이어 카드 ({p_score}점)", value=render_cards(self.player_hand), inline=False)
+        
+        if end:
+            embed.add_field(name=f"🤖 딜러 카드 ({d_score}점)", value=render_cards(self.dealer_hand), inline=False)
+        else:
+            embed.add_field(name="🤖 딜러 카드", value=f"{render_cards([self.dealer_hand[0]])} `❓`", inline=False)
+
+        return embed
+
+    @discord.ui.button(label="히트 (Hit)", style=discord.ButtonStyle.primary, emoji="🃏")
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.player:
+            await interaction.response.send_message("❌ 본인의 게임만 조작할 수 있습니다.", ephemeral=True)
+            return
+
+        self.player_hand.append(self.deck.pop())
+        p_score = calculate_score(self.player_hand)
+
+        if p_score > 21:
+            # 버스트 (패배) - 1.5배 손실
+            loss_amount = int(self.bet * 1.5)
+            cursor.execute('UPDATE users SET points = points - ? WHERE user_id = ?', (loss_amount, self.player.id))
+            conn.commit()
+
+            for child in self.children:
+                child.disabled = True
+
+            embed = self.make_embed(title="💥 버스트! (21점 초과 패배)", end=True)
+            embed.add_field(name="결과", value=f"💀 21점을 초과하여 패배했습니다.\n🔻 **-{loss_amount:,}** PT 차감되었습니다.", inline=False)
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.stop()
+        else:
+            await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="스탠드 (Stand)", style=discord.ButtonStyle.success, emoji="✋")
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.player:
+            await interaction.response.send_message("❌ 본인의 게임만 조작할 수 있습니다.", ephemeral=True)
+            return
+
+        for child in self.children:
+            child.disabled = True
+
+        # 딜러 AI: 17점 이상이 될 때까지 계속 뽑음
+        while calculate_score(self.dealer_hand) < 17:
+            self.dealer_hand.append(self.deck.pop())
+
+        p_score = calculate_score(self.player_hand)
+        d_score = calculate_score(self.dealer_hand)
+
+        loss_amount = int(self.bet * 1.5)
+        win_amount = self.bet  # 순이익 = 베팅금 100% 추가 (총 2배 환급 효과)
+
+        if d_score > 21:
+            # 딜러 버스트 -> 유저 승리
+            cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (win_amount, self.player.id))
+            conn.commit()
+            result_msg = f"🏆 딜러 버스트! 승리했습니다!\n🔺 **+{win_amount:,}** PT 획득!"
+        elif p_score > d_score:
+            # 유저 승리
+            cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (win_amount, self.player.id))
+            conn.commit()
+            result_msg = f"🏆 딜러보다 높은 점수로 승리했습니다!\n🔺 **+{win_amount:,}** PT 획득!"
+        elif p_score < d_score:
+            # 유저 패배 (1.5배 차감)
+            cursor.execute('UPDATE users SET points = points - ? WHERE user_id = ?', (loss_amount, self.player.id))
+            conn.commit()
+            result_msg = f"💀 딜러보다 점수가 낮아 패배했습니다...\n🔻 **-{loss_amount:,}** PT 차감되었습니다."
+        else:
+            # 무승부 (변동 없음)
+            result_msg = "🤝 무승부입니다! 베팅금이 적립/차감 없이 보존됩니다."
+
+        embed = self.make_embed(title="🎲 게임 종료", end=True)
+        embed.add_field(name="결과", value=result_msg, inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+
+@bot.tree.command(name="블랙잭", description="포인트를 걸고 블랙잭 게임을 합니다. (패배 시 1.5배 손실!)")
+@app_commands.describe(베팅금액="베팅할 포인트 금액")
+async def blackjack_start(interaction: discord.Interaction, 베팅금액: int):
+    if 베팅금액 <= 0:
+        await interaction.response.send_message("❌ 베팅 금액은 1 PT 이상이어야 합니다.", ephemeral=True)
+        return
+
+    # 유저의 현재 보유 포인트 및 최대 손실 가능액(1.5배) 체크
+    cursor.execute('SELECT points FROM users WHERE user_id = ?', (interaction.user.id,))
+    row = cursor.fetchone()
+    current_pts = row[0] if row else 0
+
+    max_loss = int(베팅금액 * 1.5)
+    if current_pts < max_loss:
+        await interaction.response.send_message(
+            f"❌ 포인트가 부족합니다!\n"
+            f"패배 시 **1.5배({max_loss:,} PT)**가 차감되므로 최소 **{max_loss:,} PT** 이상 보유하고 있어야 합니다.\n"
+            f"(현재 보유: **{current_pts:,}** PT)", 
+            ephemeral=True
+        )
+        return
+
+    view = BlackjackView(interaction.user, 베팅금액)
+    embed = view.make_embed()
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+# --------------------------------------------------
+# [기존 기능] 틱택토 게임 로직 및 View
 # --------------------------------------------------
 
 class TicTacToeButton(discord.ui.Button):
@@ -132,27 +283,22 @@ class TicTacToeButton(discord.ui.Button):
             await interaction.response.send_message("❌ 이미 선택된 칸입니다!", ephemeral=True)
             return
 
-        # 유저 턴 (❌ 표시)
         view.board[self.y][self.x] = 1
         self.style = discord.ButtonStyle.danger
         self.label = "❌"
         self.disabled = True
 
-        # 라운드 승패 판정 (유저 승리 체크)
         if view.check_winner(1):
             view.p_wins += 1
             await view.next_round(interaction, f"🎉 **{view.current_round}라운드 승리!**")
             return
 
-        # 무승부 체크
         if view.is_board_full():
             await view.next_round(interaction, f"🤝 **{view.current_round}라운드 무승부!**")
             return
 
-        # AI 턴 (⭕ 표시)
         view.bot_move()
 
-        # AI 승리 체크
         if view.check_winner(2):
             view.b_wins += 1
             await view.next_round(interaction, f"🤖 **{view.current_round}라운드 AI 승리!**")
@@ -169,9 +315,9 @@ class TicTacToeView(discord.ui.View):
     def __init__(self, player: discord.User, size: int, difficulty: str):
         super().__init__(timeout=180)
         self.player = player
-        self.size = size  # 3 또는 6
-        self.win_req = 3 if size == 3 else 4  # 승리 조건 (3x3은 3줄, 6x6은 4줄 연속)
-        self.difficulty = difficulty  # 'easy', 'normal', 'hard'
+        self.size = size
+        self.win_req = 3 if size == 3 else 4
+        self.difficulty = difficulty
         
         self.current_round = 1
         self.p_wins = 0
@@ -186,7 +332,7 @@ class TicTacToeView(discord.ui.View):
         for y in range(self.size):
             for x in range(self.size):
                 if self.size == 6 and (x >= 5 or y >= 5): 
-                    continue # 디스코드 버튼 최대 25개 제한으로 5x5 그리드로 보정
+                    continue
                 self.add_item(TicTacToeButton(x, y))
 
     def is_board_full(self) -> bool:
@@ -204,16 +350,12 @@ class TicTacToeView(discord.ui.View):
 
         for r in range(limit):
             for c in range(limit):
-                # 가로
                 if c + req <= limit and all(b[r][c+i] == mark for i in range(req)):
                     return True
-                # 세로
                 if r + req <= limit and all(b[r+i][c] == mark for i in range(req)):
                     return True
-                # 대각선 ↘
                 if r + req <= limit and c + req <= limit and all(b[r+i][c+i] == mark for i in range(req)):
                     return True
-                # 대각선 ↙
                 if r + req <= limit and c - req + 1 >= 0 and all(b[r+i][c-i] == mark for i in range(req)):
                     return True
         return False
@@ -231,11 +373,7 @@ class TicTacToeView(discord.ui.View):
 
         target_move = None
 
-        # ----------------------------------
-        # AI 난이도별 스마트 로직
-        # ----------------------------------
         if self.difficulty in ['normal', 'hard']:
-            # 1. AI가 이번 수로 이길 수 있는지 체크 (공격)
             for x, y in empty_cells:
                 self.board[y][x] = 2
                 if self.check_winner(2):
@@ -244,7 +382,6 @@ class TicTacToeView(discord.ui.View):
                     break
                 self.board[y][x] = 0
 
-            # 2. 유저가 다음 수로 이기는 것을 방어 (블로킹)
             if not target_move:
                 for x, y in empty_cells:
                     self.board[y][x] = 1
@@ -255,25 +392,21 @@ class TicTacToeView(discord.ui.View):
                     self.board[y][x] = 0
 
         if self.difficulty == 'hard' and not target_move:
-            # 3. 어려움 난이도: 중앙 선점 시도
             center = limit // 2
             if (center, center) in empty_cells:
                 target_move = (center, center)
             else:
-                # 모서리 선점 시도
                 corners = [(0, 0), (0, limit - 1), (limit - 1, 0), (limit - 1, limit - 1)]
                 available_corners = [c for c in corners if c in empty_cells]
                 if available_corners:
                     target_move = random.choice(available_corners)
 
-        # 결정된 위치가 없으면 랜덤 선택
         if not target_move:
             target_move = random.choice(empty_cells)
 
         x, y = target_move
         self.board[y][x] = 2
 
-        # 버튼 UI 업데이트
         for item in self.children:
             if isinstance(item, TicTacToeButton) and item.x == x and item.y == y:
                 item.style = discord.ButtonStyle.success
@@ -334,10 +467,6 @@ class TicTacToeView(discord.ui.View):
         conn.commit()
 
 
-# --------------------------------------------------
-# [명령어] /틱택토 및 /틱택토승률
-# --------------------------------------------------
-
 @bot.tree.command(name="틱택토", description="AI와 틱택토 3라운드 대결을 진행합니다.")
 @app_commands.describe(판크기="게임판 크기를 선택하세요.", 난이도="AI의 난이도를 선택하세요.")
 @app_commands.choices(
@@ -388,7 +517,7 @@ async def tictactoe_stats(interaction: discord.Interaction, 유저: discord.User
 
 
 # --------------------------------------------------
-# [기존 명령어 모음]
+# [기존 기타 명령어 모음]
 # --------------------------------------------------
 
 class PollView(discord.ui.View):
