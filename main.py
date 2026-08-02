@@ -28,7 +28,7 @@ def keep_alive():
 TOKEN = os.getenv("TOKEN")
 
 # --------------------------------------------------
-# [DB 설정] SQLite 데이터베이스 연결 및 테이블 생성 (REAL 타입 사용으로 소수점 지원)
+# [DB 설정] SQLite 데이터베이스 연결 및 테이블 생성
 # --------------------------------------------------
 conn = sqlite3.connect('points.db')
 cursor = conn.cursor()
@@ -111,7 +111,7 @@ async def on_message(message: discord.Message):
 
 
 # --------------------------------------------------
-# [미니게임] 블랙잭 (소수점 지원 및 버그 수정 완료)
+# [미니게임] 블랙잭 (최소 10 PT 베팅, 소수점 자유 지원)
 # --------------------------------------------------
 
 SUITS = ['♠️', '♥️', '♦️', '♣️']
@@ -230,24 +230,27 @@ class BlackjackView(discord.ui.View):
         self.stop()
 
 
-@bot.tree.command(name="블랙잭", description="포인트를 걸고 블랙잭 게임을 합니다. (소수점 가능, 패배 시 1.5배 손실)")
-@app_commands.describe(베팅금액="베팅할 포인트 금액 (예: 10 또는 10.5)")
+@bot.tree.command(name="블랙잭", description="포인트를 걸고 블랙잭 게임을 합니다. (최소 10 PT 이상, 소수점 가능)")
+@app_commands.describe(베팅금액="베팅할 포인트 금액 (최소 10 PT 이상, 예: 10, 11.5, 20.25)")
 async def blackjack_start(interaction: discord.Interaction, 베팅금액: float):
-    if 베팅금액 <= 0:
-        await interaction.response.send_message("❌ 베팅 금액은 0보다 커야 합니다.", ephemeral=True)
-        return
-
+    # 소수점 둘째 자리까지 반올림 정리
     베팅금액 = round(베팅금액, 2)
+
+    # 최소 베팅 금액 제한 (10 PT 이상)
+    if 베팅금액 < 10.0:
+        await interaction.response.send_message("❌ 블랙잭은 최소 **10 PT**부터 시작할 수 있습니다. (예: 10, 11.5 등)", ephemeral=True)
+        return
 
     cursor.execute('SELECT points FROM users WHERE user_id = ?', (interaction.user.id,))
     row = cursor.fetchone()
     current_pts = float(row[0]) if row else 0.0
 
+    # 1.5배 손실 금액 보유 여부 확인
     max_loss = round(베팅금액 * 1.5, 2)
     if current_pts < max_loss:
         await interaction.response.send_message(
             f"❌ 포인트가 부족합니다!\n"
-            f"패배 시 **1.5배({max_loss:,.2f} PT)**가 차감되므로 최소 **{max_loss:,.2f} PT** 이상 보유해야 합니다.\n"
+            f"**{베팅금액:,.2f} PT** 베팅 시 패배 리스크(**1.5배 = {max_loss:,.2f} PT**) 이상의 포인트를 보유해야 합니다.\n"
             f"(현재 보유: **{current_pts:,.2f}** PT)", 
             ephemeral=True
         )
@@ -256,6 +259,50 @@ async def blackjack_start(interaction: discord.Interaction, 베팅금액: float)
     view = BlackjackView(interaction.user, 베팅금액)
     embed = view.make_embed()
     await interaction.response.send_message(embed=embed, view=view)
+
+
+@bot.tree.command(name="블랙잭설명", description="블랙잭 게임의 규칙 및 이용법을 확인합니다.")
+async def blackjack_info(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🃏 블랙잭 게임 가이드 및 규칙",
+        description="카드의 합이 **21**을 초과하지 않으면서 **딜러보다 21에 가까운 점수**를 만들면 승리하는 게임입니다.",
+        color=discord.Color.gold()
+    )
+    
+    embed.add_field(
+        name="📌 주요 규칙 요약",
+        value=(
+            "• **최소 베팅금:** `10 PT` 이상부터 사용 가능 (소수점 베팅 가능: 11.5, 15.25 등)\n"
+            "• **히트 (Hit):** 카드를 1장 더 뽑습니다.\n"
+            "• **스탠드 (Stand):** 현재 카드로 딜러와 점수를 겨룹니다.\n"
+            "• **딜러 규칙:** 딜러는 점수가 `17점` 이상이 될 때까지 자동으로 카드를 뽑습니다."
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🔢 카드 점수 계산법",
+        value=(
+            "• **2 ~ 10:** 카드 표기 숫자 그대로 계산\n"
+            "• **J, Q, K:** 각각 `10점`으로 계산\n"
+            "• **A (Ace):** 21점을 넘지 않으면 `11점`, 넘어가면 `1점`으로 자동 변경"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="💰 승패 및 포인트 배율",
+        value=(
+            "• **승리:** 베팅금만큼 포인트를 획득합니다. (`+1.0배`)\n"
+            "• **무승부:** 베팅금을 그대로 돌려받습니다.\n"
+            "• **패배 / 버스트:** 베팅금의 **1.5배** 손실이 발생합니다! (`-1.5배`)\n"
+            "  *(※ 패배 리스크를 감안하여 베팅 금액의 1.5배만큼 포인트 잔액을 보유해야만 게임 시작 가능)*"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text=f"요청자: {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
 
 
 # --------------------------------------------------
@@ -308,7 +355,7 @@ async def remove_points(interaction: discord.Interaction, 유저: discord.Member
     cursor.execute('SELECT points FROM users WHERE user_id = ?', (유저.id,))
     result = cursor.fetchone()
 
-    current_points = result[0] if result else 0.0
+    current_points = float(result[0]) if result else 0.0
     new_points = max(0.0, round(current_points - 차감액, 2))
 
     cursor.execute('INSERT INTO users (user_id, points, last_chat) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET points = ?', 
@@ -813,5 +860,5 @@ if TOKEN:
     bot.run(TOKEN)
 else:
     print("❌ 에러: TOKEN 환경변수가 설정되지 않았습니다.")
- 않았습니다.")
+
 
