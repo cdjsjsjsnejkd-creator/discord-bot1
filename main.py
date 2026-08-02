@@ -153,15 +153,12 @@ class BlackjackBotView(discord.ui.View):
         p_score = calculate_score(self.player_hand)
         d_score = calculate_score(self.dealer_hand)
 
-        cursor.execute('SELECT points FROM users WHERE user_id = ?', (self.player.id,))
-        row = cursor.fetchone()
-        current_pts = float(row[0]) if row else 0.0
-        potential_loss = round(current_pts * 0.5, 2)
-        win_reward = round(self.bet * 2, 2)
+        loss_amount = round(self.bet * 0.5, 2)
+        win_reward = round(self.bet, 2)
 
         embed = discord.Embed(title=title, color=discord.Color.gold() if not end else discord.Color.dark_purple())
         embed.set_author(name=self.player.display_name, icon_url=self.player.display_avatar.url)
-        embed.add_field(name="💰 베팅금액", value=f"**{self.bet:,.2f}** PT (승리 시 **+{win_reward:,.2f}** / 패배 시 보유액 50%인 **-{potential_loss:,.2f}** PT)", inline=False)
+        embed.add_field(name="💰 베팅 정보", value=f"베팅금: **{self.bet:,.2f}** PT\n(승리 시 **+{win_reward:,.2f}** PT / 패배 시 50% 환불로 **-{loss_amount:,.2f}** PT)", inline=False)
         embed.add_field(name=f"👤 플레이어 카드 ({p_score}점 / 100점)", value=render_cards(self.player_hand), inline=False)
         
         if end:
@@ -180,11 +177,7 @@ class BlackjackBotView(discord.ui.View):
         p_score = calculate_score(self.player_hand)
 
         if p_score > 100:
-            cursor.execute('SELECT points FROM users WHERE user_id = ?', (self.player.id,))
-            row = cursor.fetchone()
-            current_pts = float(row[0]) if row else 0.0
-            loss_amount = round(current_pts * 0.5, 2)
-
+            loss_amount = round(self.bet * 0.5, 2)
             cursor.execute('UPDATE users SET points = MAX(0, points - ?) WHERE user_id = ?', (loss_amount, self.player.id))
             conn.commit()
 
@@ -192,7 +185,7 @@ class BlackjackBotView(discord.ui.View):
                 child.disabled = True
 
             embed = self.make_embed(title="💥 버스트! (100점 초과 패배)", end=True)
-            embed.add_field(name="결과", value=f"💀 100점을 초과하여 패배했습니다.\n🔻 보유 포인트의 50%인 **-{loss_amount:,.2f}** PT가 차감되었습니다.", inline=False)
+            embed.add_field(name="결과", value=f"💀 100점을 초과하여 패배했습니다.\n🔻 베팅금의 50%인 **-{loss_amount:,.2f}** PT가 차감되었습니다. (50% 환불)", inline=False)
             await interaction.response.edit_message(embed=embed, view=self)
             self.stop()
         else:
@@ -212,21 +205,17 @@ class BlackjackBotView(discord.ui.View):
 
         p_score = calculate_score(self.player_hand)
         d_score = calculate_score(self.dealer_hand)
-        win_amount = round(self.bet * 2, 2)
+        win_amount = round(self.bet, 2)
+        loss_amount = round(self.bet * 0.5, 2)
 
         if d_score > 100 or p_score > d_score:
             cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (win_amount, self.player.id))
             conn.commit()
-            result_msg = f"🏆 승리했습니다!\n🔺 베팅금의 2배인 **+{win_amount:,.2f}** PT 획득!"
+            result_msg = f"🏆 승리했습니다!\n🔺 **+{win_amount:,.2f}** PT 획득!"
         elif p_score < d_score:
-            cursor.execute('SELECT points FROM users WHERE user_id = ?', (self.player.id,))
-            row = cursor.fetchone()
-            current_pts = float(row[0]) if row else 0.0
-            loss_amount = round(current_pts * 0.5, 2)
-
             cursor.execute('UPDATE users SET points = MAX(0, points - ?) WHERE user_id = ?', (loss_amount, self.player.id))
             conn.commit()
-            result_msg = f"💀 패배했습니다...\n🔻 보유 포인트의 50%인 **-{loss_amount:,.2f}** PT가 차감되었습니다."
+            result_msg = f"💀 패배했습니다...\n🔻 베팅금의 50%인 **-{loss_amount:,.2f}** PT가 차감되었습니다. (50% 환불)"
         else:
             result_msg = "🤝 무승부입니다! 베팅금이 보존됩니다."
 
@@ -260,7 +249,7 @@ class BlackjackPVPView(discord.ui.View):
         s2 = calculate_score(self.p2_hand)
 
         embed = discord.Embed(title=title, color=discord.Color.red() if end else discord.Color.blue())
-        embed.add_field(name="💰 판돈", value=f"각각 **{self.bet:,.2f}** PT (승자 **+{self.bet*2:,.2f}** PT 획득)", inline=False)
+        embed.add_field(name="💰 판돈", value=f"각각 **{self.bet:,.2f}** PT (승자 **+{self.bet:,.2f}** PT 획득 / 패자 **-{self.bet*0.5:,.2f}** PT 손실)", inline=False)
         
         embed.add_field(name=f"👤 {self.p1.display_name} ({s1}점)", value=render_cards(self.p1_hand), inline=True)
         embed.add_field(name=f"👤 {self.p2.display_name} ({s2}점)", value=render_cards(self.p2_hand), inline=True)
@@ -297,10 +286,11 @@ class BlackjackPVPView(discord.ui.View):
 
             if winner:
                 loser = self.p2 if winner == self.p1 else self.p1
-                cursor.execute('UPDATE users SET points = MAX(0, points - ?) WHERE user_id = ?', (self.bet, loser.id))
+                loss_amount = round(self.bet * 0.5, 2)
+                cursor.execute('UPDATE users SET points = MAX(0, points - ?) WHERE user_id = ?', (loss_amount, loser.id))
                 cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (self.bet, winner.id))
                 conn.commit()
-                msg = f"🏆 **{winner.mention}** 님이 승리하여 **+{self.bet:,.2f} PT**를 획득했습니다!"
+                msg = f"🏆 **{winner.mention}** 님이 승리하여 **+{self.bet:,.2f} PT**를 획득했습니다!\n(패배자 **-{loss_amount:,.2f} PT** 차감)"
 
             embed = self.make_embed(title="🎲 대전 종료", end=True)
             embed.add_field(name="결과", value=msg, inline=False)
@@ -735,9 +725,9 @@ async def blackjack_info(interaction: discord.Interaction):
     embed.add_field(
         name="💰 승패 및 포인트 배율",
         value=(
-            "• **승리:** 베팅금의 **2배**를 획득합니다!\n"
-            "• **무승부:** 베팅금을 그대로 돌려받습니다.\n"
-            "• **AI전 패배:** 현재 보유 포인트의 **절반(50%)**이 차감됩니다!"
+            "• **승리:** 베팅금만큼 추가 획득 (+100%)\n"
+            "• **무승부:** 베팅금을 그대로 보존\n"
+            "• **패배:** 베팅금의 **50%만 손실** (나머지 50%는 환불)"
         ),
         inline=False
     )
