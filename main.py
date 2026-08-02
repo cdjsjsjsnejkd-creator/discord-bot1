@@ -668,7 +668,7 @@ class TicTacToeView(discord.ui.View):
 )
 @app_commands.choices(
     상대=[
-        app_commands.Choice(name="🤖 봇 (AI 대전)", value="bot"),
+        app_commands.Choice(name="🤖 봇 (AI 대전 - 최대 50 PT)", value="bot"),
         app_commands.Choice(name="⚔️ 플레이어 대전 (1v1 매칭)", value="player")
     ]
 )
@@ -676,6 +676,11 @@ async def blackjack_start(interaction: discord.Interaction, 상대: app_commands
     베팅금액 = round(베팅금액, 2)
     if 베팅금액 < 10.0:
         await interaction.response.send_message("❌ 블랙잭은 최소 **10 PT**부터 시작할 수 있습니다.", ephemeral=True)
+        return
+
+    # 🤖 AI(봇) 대전일 경우 50 PT 제한 체크
+    if 상대.value == "bot" and 베팅금액 > 50.0:
+        await interaction.response.send_message("❌ 봇(AI) 대전은 최대 **50 PT**까지만 베팅할 수 있습니다!", ephemeral=True)
         return
 
     cursor.execute('SELECT points FROM users WHERE user_id = ?', (interaction.user.id,))
@@ -710,7 +715,7 @@ async def blackjack_info(interaction: discord.Interaction):
     embed.add_field(
         name="📌 주요 규칙 요약",
         value=(
-            "• **최소 베팅금:** `10 PT` 이상부터 사용 가능\n"
+            "• **베팅금 제한:** 최소 `10 PT` 이상 (※ **봇 대전은 최대 50 PT**까지 가능)\n"
             "• **상대 선택:** AI 봇 대전 또는 플레이어간 1v1 대전 선택 가능\n"
             "• **히트 (Hit):** 카드를 1장 더 뽑습니다.\n"
             "• **스탠드 (Stand):** 현재 카드로 점수를 겨룹니다.\n"
@@ -1100,4 +1105,4 @@ if TOKEN:
     keep_alive()
     bot.run(TOKEN)
 else:
-    print("❌ 에러: TOKEN 환경변수가 설정되지 않았습니다.")
+    print("❌ 에러: TOKEN 환경변수가 설정되지 않았증니다.")
