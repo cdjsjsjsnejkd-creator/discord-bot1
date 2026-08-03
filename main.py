@@ -3,7 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import random
 import os
-import sqlite3
+import aiosqlite
 import time
 from flask import Flask
 from threading import Thread
@@ -27,42 +27,10 @@ def keep_alive():
     t.start()
 
 TOKEN = os.getenv("TOKEN")
+DB_PATH = 'points.db'
 
 # --------------------------------------------------
-# [DB 설정] 서버별 독립 통장(PRIMARY KEY: guild_id, user_id)
-# --------------------------------------------------
-conn = sqlite3.connect('points.db', check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        guild_id INTEGER,
-        user_id INTEGER,
-        points REAL DEFAULT 0,
-        last_chat REAL DEFAULT 0,
-        PRIMARY KEY (guild_id, user_id)
-    )
-''')
-
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS warnings (
-        user_id INTEGER PRIMARY KEY,
-        warnings INTEGER DEFAULT 0
-    )
-''')
-
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS tictactoe_stats (
-        user_id INTEGER PRIMARY KEY,
-        wins INTEGER DEFAULT 0,
-        losses INTEGER DEFAULT 0,
-        draws INTEGER DEFAULT 0
-    )
-''')
-conn.commit()
-
-# --------------------------------------------------
-# [Intents 및 Bot 설정]
+# [Intents 및 Bot 클래스 정의]
 # --------------------------------------------------
 intents = discord.Intents.default()
 intents.members = True
@@ -71,10 +39,45 @@ intents.message_content = True
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents, reconnect=True)
+        self.db: aiosqlite.Connection = None
 
     async def setup_hook(self):
+        # 비동기 DB 연결 설정
+        self.db = await aiosqlite.connect(DB_PATH)
+        await self.init_db()
         await self.tree.sync()
-        print("✅ 슬래시 명령어 동기화 완료")
+        print("✅ 슬래시 명령어 및 DB 동기화 완료")
+
+    async def init_db(self):
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                guild_id INTEGER,
+                user_id INTEGER,
+                points REAL DEFAULT 0,
+                last_chat REAL DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS warnings (
+                user_id INTEGER PRIMARY KEY,
+                warnings INTEGER DEFAULT 0
+            )
+        ''')
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS tictactoe_stats (
+                user_id INTEGER PRIMARY KEY,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                draws INTEGER DEFAULT 0
+            )
+        ''')
+        await self.db.commit()
+
+    async def close(self):
+        if self.db:
+            await self.db.close()
+        await super().close()
 
     async def on_ready(self):
         print(f"✅ 로그인 완료: {self.user}")
@@ -95,21 +98,21 @@ async def on_message(message: discord.Message):
     user_id = message.author.id
     current_time = time.time()
 
-    cursor.execute('SELECT points, last_chat FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
-    result = cursor.fetchone()
+    async with bot.db.execute('SELECT points, last_chat FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, user_id)) as cursor:
+        result = await cursor.fetchone()
 
     if result is None:
         earned = float(random.randint(5, 15))
-        cursor.execute('INSERT INTO users (guild_id, user_id, points, last_chat) VALUES (?, ?, ?, ?)',
-                       (guild_id, user_id, earned, current_time))
-        conn.commit()
+        await bot.db.execute('INSERT INTO users (guild_id, user_id, points, last_chat) VALUES (?, ?, ?, ?)',
+                             (guild_id, user_id, earned, current_time))
+        await bot.db.commit()
     else:
         points, last_chat = result
         if current_time - last_chat >= CHAT_COOLDOWN:
             earned = float(random.randint(5, 15))
-            cursor.execute('UPDATE users SET points = points + ?, last_chat = ? WHERE guild_id = ? AND user_id = ?',
-                           (earned, current_time, guild_id, user_id))
-            conn.commit()
+            await bot.db.execute('UPDATE users SET points = points + ?, last_chat = ? WHERE guild_id = ? AND user_id = ?',
+                                 (earned, current_time, guild_id, user_id))
+            await bot.db.commit()
 
     await bot.process_commands(message)
 
@@ -130,7 +133,9 @@ def calculate_score(cards):
             score += 11
         else:
             score += int(rank)
-    while score > 100 and aces:
+            
+    # 100점 초과 시 Ace 점수 조율 (11점 -> 1점 변환)
+    while score > 100 and aces > 0:
         score -= 10
         aces -= 1
     return score
@@ -182,9 +187,9 @@ class BlackjackBotView(discord.ui.View):
 
         if p_score > 100:
             loss_amount = round(self.bet * 0.5, 2)
-            cursor.execute('UPDATE users SET points = MAX(0, points - ?) WHERE guild_id = ? AND user_id = ?', 
-                           (loss_amount, self.guild_id, self.player.id))
-            conn.commit()
+            await bot.db.execute('UPDATE users SET points = MAX(0, points - ?) WHERE guild_id = ? AND user_id = ?', 
+                                 (loss_amount, self.guild_id, self.player.id))
+            await bot.db.commit()
 
             for child in self.children:
                 child.disabled = True
@@ -214,14 +219,14 @@ class BlackjackBotView(discord.ui.View):
         loss_amount = round(self.bet * 0.5, 2)
 
         if d_score > 100 or p_score > d_score:
-            cursor.execute('UPDATE users SET points = points + ? WHERE guild_id = ? AND user_id = ?', 
-                           (win_amount, self.guild_id, self.player.id))
-            conn.commit()
+            await bot.db.execute('UPDATE users SET points = points + ? WHERE guild_id = ? AND user_id = ?', 
+                                 (win_amount, self.guild_id, self.player.id))
+            await bot.db.commit()
             result_msg = f"🏆 승리했습니다!\n🔺 **+{win_amount:,.2f}** PT 획득!"
         elif p_score < d_score:
-            cursor.execute('UPDATE users SET points = MAX(0, points - ?) WHERE guild_id = ? AND user_id = ?', 
-                           (loss_amount, self.guild_id, self.player.id))
-            conn.commit()
+            await bot.db.execute('UPDATE users SET points = MAX(0, points - ?) WHERE guild_id = ? AND user_id = ?', 
+                                 (loss_amount, self.guild_id, self.player.id))
+            await bot.db.commit()
             result_msg = f"💀 패배했습니다...\n🔻 베팅금의 50%인 **-{loss_amount:,.2f}** PT가 차감되었습니다. (50% 환불)"
         else:
             result_msg = "🤝 무승부입니다! 베팅금이 보존됩니다."
@@ -279,6 +284,7 @@ class BlackjackPVPView(discord.ui.View):
             p2_bust = s2 > 100
 
             winner = None
+            msg = ""
             if p1_bust and p2_bust:
                 msg = "💥 둘 다 100점 초과 버스트로 무승부 처리되었습니다."
             elif p1_bust:
@@ -295,11 +301,11 @@ class BlackjackPVPView(discord.ui.View):
             if winner:
                 loser = self.p2 if winner == self.p1 else self.p1
                 loss_amount = round(self.bet * 0.5, 2)
-                cursor.execute('UPDATE users SET points = MAX(0, points - ?) WHERE guild_id = ? AND user_id = ?', 
-                               (loss_amount, self.guild_id, loser.id))
-                cursor.execute('UPDATE users SET points = points + ? WHERE guild_id = ? AND user_id = ?', 
-                               (self.bet, self.guild_id, winner.id))
-                conn.commit()
+                await bot.db.execute('UPDATE users SET points = MAX(0, points - ?) WHERE guild_id = ? AND user_id = ?', 
+                                     (loss_amount, self.guild_id, loser.id))
+                await bot.db.execute('UPDATE users SET points = points + ? WHERE guild_id = ? AND user_id = ?', 
+                                     (self.bet, self.guild_id, winner.id))
+                await bot.db.commit()
                 msg = f"🏆 **{winner.mention}** 님이 승리하여 **+{self.bet:,.2f} PT**를 획득했습니다!\n(패배자 **-{loss_amount:,.2f} PT** 차감)"
 
             embed = self.make_embed(title="🎲 대전 종료", end=True)
@@ -364,8 +370,8 @@ class MatchWaitView(discord.ui.View):
         guild_id = interaction.guild_id
 
         if self.game_type == "blackjack":
-            cursor.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, interaction.user.id))
-            row = cursor.fetchone()
+            async with bot.db.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, interaction.user.id)) as cursor:
+                row = await cursor.fetchone()
             pts = float(row[0]) if row else 0.0
             if pts < self.bet:
                 await interaction.response.send_message(f"❌ 포인트가 부족합니다. (필요: **{self.bet:,.2f}** PT)", ephemeral=True)
@@ -627,13 +633,13 @@ class TicTacToeView(discord.ui.View):
             for item in self.children: item.disabled = True
             if self.p_wins > self.b_wins:
                 final_msg = "🏆 **최종 승리! 플레이어가 대결에서 이겼습니다!**"
-                self.record_result(self.player.id, "win")
+                await self.record_result(self.player.id, "win")
             elif self.b_wins > self.p_wins:
                 final_msg = "💀 **최종 패배! AI가 대결에서 이겼습니다!**"
-                self.record_result(self.player.id, "loss")
+                await self.record_result(self.player.id, "loss")
             else:
                 final_msg = "🤝 **최종 무승부! 경기 결과가 비겼습니다.**"
-                self.record_result(self.player.id, "draw")
+                await self.record_result(self.player.id, "draw")
             embed = self.make_embed(f"{round_msg}\n\n{final_msg}")
             await interaction.response.edit_message(embed=embed, view=self)
             self.stop()
@@ -643,22 +649,22 @@ class TicTacToeView(discord.ui.View):
             embed = self.make_embed(f"{round_msg}\n\n➡️ **{self.current_round}라운드를 시작합니다!**")
             await interaction.response.edit_message(embed=embed, view=self)
 
-    def record_result(self, user_id: int, result: str):
-        cursor.execute('SELECT wins, losses, draws FROM tictactoe_stats WHERE user_id = ?', (user_id,))
-        row = cursor.fetchone()
+    async def record_result(self, user_id: int, result: str):
+        async with bot.db.execute('SELECT wins, losses, draws FROM tictactoe_stats WHERE user_id = ?', (user_id,)) as cursor:
+            row = await cursor.fetchone()
 
         if row is None:
             w, l, d = (1 if result == "win" else 0, 1 if result == "loss" else 0, 1 if result == "draw" else 0)
-            cursor.execute('INSERT INTO tictactoe_stats (user_id, wins, losses, draws) VALUES (?, ?, ?, ?)',
-                           (user_id, w, l, d))
+            await bot.db.execute('INSERT INTO tictactoe_stats (user_id, wins, losses, draws) VALUES (?, ?, ?, ?)',
+                                 (user_id, w, l, d))
         else:
             w, l, d = row
             if result == "win": w += 1
             elif result == "loss": l += 1
             elif result == "draw": d += 1
-            cursor.execute('UPDATE tictactoe_stats SET wins = ?, losses = ?, draws = ? WHERE user_id = ?',
-                           (w, l, d, user_id))
-        conn.commit()
+            await bot.db.execute('UPDATE tictactoe_stats SET wins = ?, losses = ?, draws = ? WHERE user_id = ?',
+                                 (w, l, d, user_id))
+        await bot.db.commit()
 
 # --------------------------------------------------
 # [슬래시 명령어] 게임 시작 명령어
@@ -691,8 +697,8 @@ async def blackjack_start(interaction: discord.Interaction, 상대: app_commands
         await interaction.response.send_message("❌ 봇(AI) 대전은 최대 **50 PT**까지만 베팅할 수 있습니다!", ephemeral=True)
         return
 
-    cursor.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, interaction.user.id))
-    row = cursor.fetchone()
+    async with bot.db.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, interaction.user.id)) as cursor:
+        row = await cursor.fetchone()
     current_pts = float(row[0]) if row else 0.0
 
     if current_pts < 베팅금액:
@@ -802,8 +808,8 @@ async def tictactoe_start(
 async def tictactoe_stats(interaction: discord.Interaction, 유저: discord.User = None):
     target = 유저 or interaction.user
 
-    cursor.execute('SELECT wins, losses, draws FROM tictactoe_stats WHERE user_id = ?', (target.id,))
-    row = cursor.fetchone()
+    async with bot.db.execute('SELECT wins, losses, draws FROM tictactoe_stats WHERE user_id = ?', (target.id,)) as cursor:
+        row = await cursor.fetchone()
 
     wins, losses, draws = row if row else (0, 0, 0)
     total_games = wins + losses + draws
@@ -837,17 +843,17 @@ async def give_points(interaction: discord.Interaction, 유저: discord.Member, 
     guild_id = interaction.guild.id
     user_id = 유저.id
 
-    cursor.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
-    result = cursor.fetchone()
+    async with bot.db.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, user_id)) as cursor:
+        result = await cursor.fetchone()
 
     if result is None:
         new_points = 지급액
-        cursor.execute('INSERT INTO users (guild_id, user_id, points, last_chat) VALUES (?, ?, ?, ?)', (guild_id, user_id, new_points, time.time()))
+        await bot.db.execute('INSERT INTO users (guild_id, user_id, points, last_chat) VALUES (?, ?, ?, ?)', (guild_id, user_id, new_points, time.time()))
     else:
         new_points = round(result[0] + 지급액, 2)
-        cursor.execute('UPDATE users SET points = ? WHERE guild_id = ? AND user_id = ?', (new_points, guild_id, user_id))
+        await bot.db.execute('UPDATE users SET points = ? WHERE guild_id = ? AND user_id = ?', (new_points, guild_id, user_id))
 
-    conn.commit()
+    await bot.db.commit()
 
     embed = discord.Embed(title="🪙 포인트 지급 완료", color=discord.Color.gold())
     embed.set_thumbnail(url=유저.display_avatar.url)
@@ -873,17 +879,20 @@ async def remove_points(interaction: discord.Interaction, 유저: discord.Member
     guild_id = interaction.guild.id
     user_id = 유저.id
 
-    cursor.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, user_id))
-    result = cursor.fetchone()
+    async with bot.db.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, user_id)) as cursor:
+        result = await cursor.fetchone()
 
     current_points = float(result[0]) if result else 0.0
     new_points = max(0.0, round(current_points - 차감액, 2))
 
-    cursor.execute('''
-        INSERT INTO users (guild_id, user_id, points, last_chat) VALUES (?, ?, ?, ?)
-        ON CONFLICT(guild_id, user_id) DO UPDATE SET points = ?
-    ''', (guild_id, user_id, new_points, time.time(), new_points))
-    conn.commit()
+    if result is None:
+        await bot.db.execute('INSERT INTO users (guild_id, user_id, points, last_chat) VALUES (?, ?, ?, ?)',
+                             (guild_id, user_id, new_points, time.time()))
+    else:
+        await bot.db.execute('UPDATE users SET points = ? WHERE guild_id = ? AND user_id = ?',
+                             (new_points, guild_id, user_id))
+    
+    await bot.db.commit()
 
     embed = discord.Embed(title="🔻 포인트 차감 완료", color=discord.Color.red())
     embed.set_thumbnail(url=유저.display_avatar.url)
@@ -944,17 +953,17 @@ async def give_warning(interaction: discord.Interaction, 유저: discord.Member,
         await interaction.response.send_message("❌ 경고 횟수는 1회 이상이어야 합니다.", ephemeral=True)
         return
 
-    cursor.execute('SELECT warnings FROM warnings WHERE user_id = ?', (유저.id,))
-    result = cursor.fetchone()
+    async with bot.db.execute('SELECT warnings FROM warnings WHERE user_id = ?', (유저.id,)) as cursor:
+        result = await cursor.fetchone()
 
     if result is None:
         new_warns = 횟수
-        cursor.execute('INSERT INTO warnings (user_id, warnings) VALUES (?, ?)', (유저.id, new_warns))
+        await bot.db.execute('INSERT INTO warnings (user_id, warnings) VALUES (?, ?)', (유저.id, new_warns))
     else:
         new_warns = result[0] + 횟수
-        cursor.execute('UPDATE warnings SET warnings = ? WHERE user_id = ?', (new_warns, 유저.id))
+        await bot.db.execute('UPDATE warnings SET warnings = ? WHERE user_id = ?', (new_warns, 유저.id))
     
-    conn.commit()
+    await bot.db.commit()
 
     embed = discord.Embed(title="⚠️ 경고 부여", color=discord.Color.red())
     embed.add_field(name="대상 유저", value=유저.mention, inline=True)
@@ -974,15 +983,18 @@ async def remove_warning(interaction: discord.Interaction, 유저: discord.Membe
         await interaction.response.send_message("❌ 차감할 횟수는 1회 이상이어야 합니다.", ephemeral=True)
         return
 
-    cursor.execute('SELECT warnings FROM warnings WHERE user_id = ?', (유저.id,))
-    result = cursor.fetchone()
+    async with bot.db.execute('SELECT warnings FROM warnings WHERE user_id = ?', (유저.id,)) as cursor:
+        result = await cursor.fetchone()
 
     current_warns = result[0] if result else 0
     new_warns = max(0, current_warns - 횟수)
 
-    cursor.execute('INSERT INTO warnings (user_id, warnings) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET warnings = ?', 
-                   (유저.id, new_warns, new_warns))
-    conn.commit()
+    if result is None:
+        await bot.db.execute('INSERT INTO warnings (user_id, warnings) VALUES (?, ?)', (유저.id, new_warns))
+    else:
+        await bot.db.execute('UPDATE warnings SET warnings = ? WHERE user_id = ?', (new_warns, 유저.id))
+    
+    await bot.db.commit()
 
     embed = discord.Embed(title="🟢 경고 차감", color=discord.Color.green())
     embed.add_field(name="대상 유저", value=유저.mention, inline=True)
@@ -998,8 +1010,8 @@ async def remove_warning(interaction: discord.Interaction, 유저: discord.Membe
 async def check_warning(interaction: discord.Interaction, 유저: discord.User = None):
     target = 유저 or interaction.user
 
-    cursor.execute('SELECT warnings FROM warnings WHERE user_id = ?', (target.id,))
-    result = cursor.fetchone()
+    async with bot.db.execute('SELECT warnings FROM warnings WHERE user_id = ?', (target.id,)) as cursor:
+        result = await cursor.fetchone()
     warns = result[0] if result else 0
 
     embed = discord.Embed(title="🚨 경고 조회", color=discord.Color.orange())
@@ -1090,8 +1102,8 @@ async def check_points(interaction: discord.Interaction, 유저: discord.User = 
     target = 유저 or interaction.user
     guild_id = interaction.guild.id
 
-    cursor.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, target.id))
-    result = cursor.fetchone()
+    async with bot.db.execute('SELECT points FROM users WHERE guild_id = ? AND user_id = ?', (guild_id, target.id)) as cursor:
+        result = await cursor.fetchone()
     pts = float(result[0]) if result else 0.0
 
     embed = discord.Embed(title="🪙 포인트 정보", color=discord.Color.gold())
@@ -1112,14 +1124,8 @@ async def show_leaderboard(interaction: discord.Interaction):
     await interaction.response.defer()
     guild_id = interaction.guild.id
 
-    try:
-        guild_members = [member async for member in interaction.guild.fetch_members()]
-        guild_member_ids = {member.id for member in guild_members}
-    except Exception:
-        guild_member_ids = {member.id for member in interaction.guild.members}
-
-    cursor.execute('SELECT user_id, points FROM users WHERE guild_id = ? ORDER BY points DESC', (guild_id,))
-    rows = cursor.fetchall()
+    async with bot.db.execute('SELECT user_id, points FROM users WHERE guild_id = ? ORDER BY points DESC LIMIT 30', (guild_id,)) as cursor:
+        rows = await cursor.fetchall()
 
     if not rows:
         await interaction.followup.send("아직 등록된 포인트 데이터가 없습니다.")
@@ -1129,10 +1135,11 @@ async def show_leaderboard(interaction: discord.Interaction):
     rank_count = 0
 
     for user_id, pts in rows:
-        if user_id in guild_member_ids:
+        member = interaction.guild.get_member(user_id)
+        if member:
             rank_count += 1
             medal = "🥇" if rank_count == 1 else "🥈" if rank_count == 2 else "🥉" if rank_count == 3 else f"`{rank_count}.`"
-            rank_text += f"{medal} <@{user_id}> - **{float(pts):,.2f}** PT\n"
+            rank_text += f"{medal} {member.mention} - **{float(pts):,.2f}** PT\n"
             
             if rank_count == 10:
                 break
@@ -1156,6 +1163,7 @@ async def show_leaderboard(interaction: discord.Interaction):
 if __name__ == "__main__":
     if TOKEN:
         keep_alive()
+        # aiosqlite 패키지가 필수적입니다 (`pip install aiosqlite`)
         bot.run(TOKEN)
     else:
         print("❌ 에러: TOKEN 환경변수가 설정되지 않았습니다.")
