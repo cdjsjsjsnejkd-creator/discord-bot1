@@ -1076,14 +1076,21 @@ async def show_leaderboard(interaction: discord.Interaction):
 
     await interaction.response.defer()
 
+    # 1. 안전한 서버 멤버 목록 가져오기 (권한 예외 처리 포함)
+    try:
+        guild_members = [member async for member in interaction.guild.fetch_members()]
+        guild_member_ids = {member.id for member in guild_members}
+    except Exception:
+        # fetch_members 권한 부족 시 기존 캐시된 멤버 사용
+        guild_member_ids = {member.id for member in interaction.guild.members}
+
+    # 2. DB 최신 데이터 조회
     cursor.execute('SELECT user_id, points FROM users ORDER BY points DESC')
     rows = cursor.fetchall()
 
     if not rows:
         await interaction.followup.send("아직 등록된 포인트 데이터가 없습니다.")
         return
-
-    guild_member_ids = {member.id for member in interaction.guild.members}
 
     rank_text = ""
     rank_count = 0
@@ -1101,8 +1108,9 @@ async def show_leaderboard(interaction: discord.Interaction):
         await interaction.followup.send("현재 서버에 랭킹에 표시될 유저 데이터가 없습니다.")
         return
 
+    server_name = interaction.guild.name.rstrip('.')
     embed = discord.Embed(
-        title=f"🏆 {interaction.guild.name} 포인트 랭킹 Top 10", 
+        title=f"🏆 {server_name} 포인트 랭킹 Top 10", 
         description=rank_text, 
         color=discord.Color.gold()
     )
