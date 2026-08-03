@@ -1068,25 +1068,46 @@ async def check_points(interaction: discord.Interaction, 유저: discord.User = 
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="랭킹", description="포인트 순위 Top 10을 확인합니다.")
+@bot.tree.command(name="랭킹", description="현재 서버 내 포인트 순위 Top 10을 확인합니다.")
 async def show_leaderboard(interaction: discord.Interaction):
-    cursor.execute('SELECT user_id, points FROM users ORDER BY points DESC LIMIT 10')
+    if not interaction.guild:
+        await interaction.response.send_message("❌ 서버 내에서만 사용할 수 있는 명령어입니다.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    cursor.execute('SELECT user_id, points FROM users ORDER BY points DESC')
     rows = cursor.fetchall()
 
     if not rows:
-        await interaction.response.send_message("아직 등록된 포인트 데이터가 없습니다.")
+        await interaction.followup.send("아직 등록된 포인트 데이터가 없습니다.")
         return
 
-    embed = discord.Embed(title="🏆 포인트 랭킹 Top 10", color=discord.Color.gold())
-    
-    rank_text = ""
-    for idx, (user_id, pts) in enumerate(rows, start=1):
-        medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"`{idx}.`"
-        rank_text += f"{medal} <@{user_id}> - **{float(pts):,.2f}** PT\n"
+    guild_member_ids = {member.id for member in interaction.guild.members}
 
-    embed.description = rank_text
+    rank_text = ""
+    rank_count = 0
+
+    for user_id, pts in rows:
+        if user_id in guild_member_ids:
+            rank_count += 1
+            medal = "🥇" if rank_count == 1 else "🥈" if rank_count == 2 else "🥉" if rank_count == 3 else f"`{rank_count}.`"
+            rank_text += f"{medal} <@{user_id}> - **{float(pts):,.2f}** PT\n"
+            
+            if rank_count == 10:
+                break
+
+    if not rank_text:
+        await interaction.followup.send("현재 서버에 랭킹에 표시될 유저 데이터가 없습니다.")
+        return
+
+    embed = discord.Embed(
+        title=f"🏆 {interaction.guild.name} 포인트 랭킹 Top 10", 
+        description=rank_text, 
+        color=discord.Color.gold()
+    )
     embed.set_footer(text=f"요청자: {interaction.user.display_name}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 # --------------------------------------------------
 # [봇 실행]
