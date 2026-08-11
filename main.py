@@ -1073,9 +1073,9 @@ async def 골라줘(interaction: discord.Interaction, 항목1: str, 항목2: str
 
 
 @bot.tree.command(name="공지", description="공지사항을 작성합니다.")
-@app_commands.describe(제목="공지 제목", 내용="공지 내용")
+@app_commands.describe(제목="공지 제목 (선택)", 내용="공지 내용")
 @app_commands.checks.has_permissions(administrator=True)
-async def notice(interaction: discord.Interaction, 제목: str, 내용: str):
+async def notice(interaction: discord.Interaction, 내용: str, 제목: str = "공지사항"):
     embed = discord.Embed(title=f"📢 {제목}", description=내용, color=discord.Color.blue())
     embed.set_footer(text=f"작성자 : {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
     embed.timestamp = discord.utils.utcnow()
@@ -1083,9 +1083,9 @@ async def notice(interaction: discord.Interaction, 제목: str, 내용: str):
 
 
 @bot.tree.command(name="업데이트", description="업데이트 공지를 작성합니다.")
-@app_commands.describe(제목="업데이트 제목", 내용="업데이트 내용")
+@app_commands.describe(제목="업데이트 제목 (선택)", 내용="업데이트 내용")
 @app_commands.checks.has_permissions(administrator=True)
-async def update(interaction: discord.Interaction, 제목: str, 내용: str):
+async def update(interaction: discord.Interaction, 내용: str, 제목: str = "업데이트 안내"):
     embed = discord.Embed(title=f"🛠️ {제목}", description=내용, color=discord.Color.green())
     embed.set_footer(text=f"작성자 : {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
     embed.timestamp = discord.utils.utcnow()
