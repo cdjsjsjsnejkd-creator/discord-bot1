@@ -72,6 +72,13 @@ class MyBot(commands.Bot):
                 draws INTEGER DEFAULT 0
             )
         ''')
+        # 서버별 설정 (환영 채널 ID 등) 테이블 추가
+        await self.db.execute('''
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id INTEGER PRIMARY KEY,
+                welcome_channel_id INTEGER
+            )
+        ''')
         await self.db.commit()
 
     async def close(self):
@@ -83,6 +90,28 @@ class MyBot(commands.Bot):
         print(f"✅ 로그인 완료: {self.user}")
 
 bot = MyBot()
+
+# --------------------------------------------------
+# [이벤트] 신규 유저 입장 감지 및 환영 메시지 전송
+# --------------------------------------------------
+@bot.event
+async def on_member_join(member: discord.Member):
+    guild = member.guild
+    async with bot.db.execute('SELECT welcome_channel_id FROM guild_settings WHERE guild_id = ?', (guild.id,)) as cursor:
+        row = await cursor.fetchone()
+
+    if row and row[0]:
+        channel_id = row[0]
+        channel = guild.get_channel(channel_id)
+        if channel:
+            embed = discord.Embed(
+                title="🎉 새로운 멤버 등장!",
+                description=f"환영합니다 **{member.display_name}**님! 서버에 오신 것을 환영합니다! 👋\n{member.mention}",
+                color=discord.Color.green()
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"현재 서버 인원: {guild.member_count}명")
+            await channel.send(embed=embed)
 
 # --------------------------------------------------
 # [이벤트] 채팅 감지 및 포인트 지급 (서버별 독립 적립)
@@ -134,7 +163,6 @@ def calculate_score(cards):
         else:
             score += int(rank)
             
-    # 100점 초과 시 Ace 점수 조율 (11점 -> 1점 변환)
     while score > 100 and aces > 0:
         score -= 10
         aces -= 1
@@ -667,6 +695,27 @@ class TicTacToeView(discord.ui.View):
         await bot.db.commit()
 
 # --------------------------------------------------
+# [슬래시 명령어] 환영 채널 설정 명령어 (관리자 전용)
+# --------------------------------------------------
+@bot.tree.command(name="환영채널설정", description="[관리자 전용] 신규 유저가 들어왔을 때 환영 인사를 보낼 채널을 설정합니다.")
+@app_commands.describe(채널="환영 메시지를 보낼 텍스트 채널 (비워두면 기능 해제)")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_welcome_channel(interaction: discord.Interaction, 채널: discord.TextChannel = None):
+    if not interaction.guild:
+        return
+
+    guild_id = interaction.guild.id
+
+    if 채널 is None:
+        await bot.db.execute('INSERT OR REPLACE INTO guild_settings (guild_id, welcome_channel_id) VALUES (?, NULL)', (guild_id,))
+        await bot.db.commit()
+        await interaction.response.send_message("🛑 환영 메시지 전송 기능이 해제되었습니다.", ephemeral=True)
+    else:
+        await bot.db.execute('INSERT OR REPLACE INTO guild_settings (guild_id, welcome_channel_id) VALUES (?, ?)', (guild_id, 채널.id))
+        await bot.db.commit()
+        await interaction.response.send_message(f"✅ 환영 채널이 {채널.mention} (으)로 설정되었습니다!", ephemeral=True)
+
+# --------------------------------------------------
 # [슬래시 명령어] 게임 시작 명령어
 # --------------------------------------------------
 
@@ -1163,7 +1212,6 @@ async def show_leaderboard(interaction: discord.Interaction):
 if __name__ == "__main__":
     if TOKEN:
         keep_alive()
-        # aiosqlite 패키지가 필수적입니다 (`pip install aiosqlite`)
         bot.run(TOKEN)
     else:
         print("❌ 에러: TOKEN 환경변수가 설정되지 않았습니다.")
