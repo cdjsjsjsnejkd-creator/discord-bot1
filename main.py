@@ -42,7 +42,6 @@ class MyBot(commands.Bot):
         self.db: aiosqlite.Connection = None
 
     async def setup_hook(self):
-        # 비동기 DB 연결 설정
         self.db = await aiosqlite.connect(DB_PATH)
         await self.init_db()
         await self.tree.sync()
@@ -72,7 +71,6 @@ class MyBot(commands.Bot):
                 draws INTEGER DEFAULT 0
             )
         ''')
-        # 서버별 설정 (환영 채널 ID 등) 테이블 추가
         await self.db.execute('''
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id INTEGER PRIMARY KEY,
@@ -90,6 +88,19 @@ class MyBot(commands.Bot):
         print(f"✅ 로그인 완료: {self.user}")
 
 bot = MyBot()
+
+# --------------------------------------------------
+# [에러 핸들러] 권한 미달 사용자 에러 처리
+# --------------------------------------------------
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        if interaction.response.is_done():
+            await interaction.followup.send("❌ 이 명령어를 사용할 수 있는 권한(관리자)이 없습니다.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ 이 명령어를 사용할 수 있는 권한(관리자)이 없습니다.", ephemeral=True)
+    else:
+        print(f"Command Error: {error}")
 
 # --------------------------------------------------
 # [이벤트] 신규 유저 입장 감지 및 환영 메시지 전송
@@ -114,7 +125,7 @@ async def on_member_join(member: discord.Member):
             await channel.send(embed=embed)
 
 # --------------------------------------------------
-# [이벤트] 채팅 감지 및 포인트 지급 (서버별 독립 적립)
+# [이벤트] 채팅 감지 및 포인트 지급
 # --------------------------------------------------
 CHAT_COOLDOWN = 60
 
@@ -172,7 +183,7 @@ def render_cards(cards):
     return " ".join([f"`{suit}{rank}`" for suit, rank in cards])
 
 # --------------------------------------------------
-# [블랙잭 - 봇(AI) 대전 View]
+# [블랙잭 - 봇 대전 View]
 # --------------------------------------------------
 class BlackjackBotView(discord.ui.View):
     def __init__(self, player: discord.User, bet: float, guild_id: int):
@@ -265,7 +276,7 @@ class BlackjackBotView(discord.ui.View):
         self.stop()
 
 # --------------------------------------------------
-# [블랙잭 - 플레이어 대전(1v1) View]
+# [블랙잭 - PVP View]
 # --------------------------------------------------
 class BlackjackPVPView(discord.ui.View):
     def __init__(self, p1: discord.User, p2: discord.User, bet: float, guild_id: int):
@@ -379,7 +390,7 @@ class BlackjackPVPView(discord.ui.View):
         await self.check_next_turn(interaction)
 
 # --------------------------------------------------
-# [1v1 대전 매칭 대기열 View]
+# [1v1 매칭 대기열 View]
 # --------------------------------------------------
 class MatchWaitView(discord.ui.View):
     def __init__(self, host: discord.User, game_type: str, bet: float = 0.0, size: int = 3):
@@ -417,7 +428,7 @@ class MatchWaitView(discord.ui.View):
         self.stop()
 
 # --------------------------------------------------
-# [틱택토 - 플레이어 대전(1v1) View]
+# [틱택토 - PVP View]
 # --------------------------------------------------
 class TicTacToePVPButton(discord.ui.Button):
     def __init__(self, x: int, y: int):
@@ -478,18 +489,16 @@ class TicTacToePVPView(discord.ui.View):
         self.board = [[0 for _ in range(self.size)] for _ in range(self.size)]
         for y in range(self.size):
             for x in range(self.size):
-                if self.size == 6 and (x >= 5 or y >= 5): continue
                 self.add_item(TicTacToePVPButton(x, y))
 
     def is_board_full(self) -> bool:
-        limit = min(self.size, 5)
-        for y in range(limit):
-            for x in range(limit):
+        for y in range(self.size):
+            for x in range(self.size):
                 if self.board[y][x] == 0: return False
         return True
 
     def check_winner(self, mark: int) -> bool:
-        limit = min(self.size, 5)
+        limit = self.size
         req = self.win_req
         b = self.board
         for r in range(limit):
@@ -525,7 +534,7 @@ class TicTacToePVPView(discord.ui.View):
             await interaction.response.edit_message(embed=embed, view=self)
 
 # --------------------------------------------------
-# [틱택토 - 봇(AI) 대전 View]
+# [틱택토 - 봇 대전 View]
 # --------------------------------------------------
 class TicTacToeButton(discord.ui.Button):
     def __init__(self, x: int, y: int):
@@ -590,18 +599,16 @@ class TicTacToeView(discord.ui.View):
         self.board = [[0 for _ in range(self.size)] for _ in range(self.size)]
         for y in range(self.size):
             for x in range(self.size):
-                if self.size == 6 and (x >= 5 or y >= 5): continue
                 self.add_item(TicTacToeButton(x, y))
 
     def is_board_full(self) -> bool:
-        limit = min(self.size, 5)
-        for y in range(limit):
-            for x in range(limit):
+        for y in range(self.size):
+            for x in range(self.size):
                 if self.board[y][x] == 0: return False
         return True
 
     def check_winner(self, mark: int) -> bool:
-        limit = min(self.size, 5)
+        limit = self.size
         req = self.win_req
         b = self.board
         for r in range(limit):
@@ -614,9 +621,8 @@ class TicTacToeView(discord.ui.View):
 
     def bot_move(self):
         empty_cells = []
-        limit = min(self.size, 5)
-        for y in range(limit):
-            for x in range(limit):
+        for y in range(self.size):
+            for x in range(self.size):
                 if self.board[y][x] == 0: empty_cells.append((x, y))
 
         if not empty_cells: return
@@ -695,7 +701,7 @@ class TicTacToeView(discord.ui.View):
         await bot.db.commit()
 
 # --------------------------------------------------
-# [슬래시 명령어] 환영 채널 설정 명령어 (관리자 전용)
+# [슬래시 명령어] 환영 채널 설정 (관리자 전용)
 # --------------------------------------------------
 @bot.tree.command(name="환영채널설정", description="[관리자 전용] 신규 유저가 들어왔을 때 환영 인사를 보낼 채널을 설정합니다.")
 @app_commands.describe(채널="환영 메시지를 보낼 텍스트 채널 (비워두면 기능 해제)")
@@ -821,7 +827,7 @@ async def blackjack_info(interaction: discord.Interaction):
     ],
     판크기=[
         app_commands.Choice(name="3x3 (기본)", value="3"),
-        app_commands.Choice(name="6x6 (확장)", value="6")
+        app_commands.Choice(name="5x5 (확장)", value="5")
     ],
     난이도=[
         app_commands.Choice(name="쉬움", value="easy"),
@@ -875,7 +881,7 @@ async def tictactoe_stats(interaction: discord.Interaction, 유저: discord.User
     await interaction.response.send_message(embed=embed)
 
 # --------------------------------------------------
-# [관리자 전용] 포인트 지급 & 차감 (서버별)
+# [관리자 전용] 포인트 지급 & 차감
 # --------------------------------------------------
 
 @bot.tree.command(name="포인트지급", description="[관리자 전용] 지정한 유저에게 포인트를 지급합니다.")
@@ -953,7 +959,7 @@ async def remove_points(interaction: discord.Interaction, 유저: discord.Member
     await interaction.response.send_message(embed=embed)
 
 # --------------------------------------------------
-# [기타 서버 관리 & 유틸리티 명령어 모음]
+# [유틸리티 및 일반 명령어]
 # --------------------------------------------------
 
 class PollView(discord.ui.View):
